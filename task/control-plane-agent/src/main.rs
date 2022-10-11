@@ -6,8 +6,7 @@
 #![no_main]
 
 use gateway_messages::{
-    sp_impl, sp_impl::Error as MgsDispatchError, IgnitionCommand, PowerState,
-    SpComponent, SpPort, UpdateId,
+    sp_impl, IgnitionCommand, PowerState, SpComponent, SpPort, UpdateId,
 };
 use mutable_statics::mutable_statics;
 use ringbuf::{ringbuf, ringbuf_entry};
@@ -18,13 +17,12 @@ use task_net_api::{
 use userlib::{sys_recv_closed, sys_set_timer, task_slot, TaskId, UnwrapLite};
 
 mod mgs_common;
-mod update_buffer;
+mod update;
 
 // If the build system enables multiple of the gimlet/sidecar/psc features, this
-// sequence of `cfg_attr`s will trigger an unused_attributes warning. We can
-// turn this into a hard error via this `deny`, which will catch any such build
-// system misconfiguration.
-#[deny(unused_attributes)]
+// sequence of `cfg_attr`s will trigger an unused_attributes warning.  We build
+// everything with -Dunused_attributes, which will catch any such build system
+// misconfiguration.
 #[cfg_attr(feature = "gimlet", path = "mgs_gimlet.rs")]
 #[cfg_attr(feature = "sidecar", path = "mgs_sidecar.rs")]
 #[cfg_attr(feature = "psc", path = "mgs_psc.rs")]
@@ -35,7 +33,6 @@ use self::mgs_handler::MgsHandler;
 task_slot!(JEFE, jefe);
 task_slot!(NET, net);
 task_slot!(SYS, sys);
-task_slot!(UPDATE_SERVER, update_server);
 
 #[allow(dead_code)] // Not all cases are used by all variants
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,7 +40,6 @@ enum Log {
     Empty,
     Wake(u32),
     Rx(UdpMetadata),
-    DispatchError(MgsDispatchError),
     SendError(SendError),
     MgsMessage(MgsMessage),
     UsartTx { num_bytes: usize },
@@ -105,7 +101,7 @@ const USART_IRQ: u32 = 1 << 1;
 // Must not conflict with IRQs above!
 const TIMER_IRQ: u32 = 1 << 2;
 
-const SOCKET: SocketName = SocketName::mgmt_gateway;
+const SOCKET: SocketName = SocketName::control_plane_agent;
 
 #[export_name = "main"]
 fn main() {
@@ -229,20 +225,17 @@ impl NetHandler {
         // Hand off to `sp_impl` to handle deserialization, calling our
         // `MgsHandler` implementation, and serializing the response we should
         // send into `self.tx_buf`.
-        match sp_impl::handle_message(
+        assert!(self.packet_to_send.is_none());
+        let n = sp_impl::handle_message(
             sender,
             sp_port_from_udp_metadata(&meta),
             &self.rx_buf[..meta.size as usize],
             mgs_handler,
             self.tx_buf,
-        ) {
-            Ok(n) => {
-                meta.size = n as u32;
-                assert!(self.packet_to_send.is_none());
-                self.packet_to_send = Some(meta);
-            }
-            Err(err) => ringbuf_entry!(Log::DispatchError(err)),
-        }
+        );
+
+        meta.size = n as u32;
+        self.packet_to_send = Some(meta);
     }
 }
 
@@ -266,5 +259,14 @@ fn vlan_id_from_sp_port(port: SpPort) -> u16 {
     match port {
         SpPort::One => VLAN_RANGE.start,
         SpPort::Two => VLAN_RANGE.start + 1,
+    }
+}
+
+#[allow(dead_code)]
+const fn usize_max(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
     }
 }
