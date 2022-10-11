@@ -59,7 +59,7 @@ cfg_if::cfg_if! {
         }
     }
     // Target boards with 1 led
-    else if #[cfg(any(target_board = "stm32g031-nucleo", target_board = "stm32g070", target_board = "stm32g0b1", target_board = "donglet-g030", target_board = "donglet-g031"))] {
+    else if #[cfg(any(target_board = "stm32g031-nucleo", target_board = "stm32g070", target_board = "stm32g0b1", target_board = "donglet-g030", target_board = "donglet-g031", target_board = "pi-pico", target_board = "pi-kb2040"))] {
         #[derive(FromPrimitive)]
         enum Led {
             Zero = 0,
@@ -596,6 +596,9 @@ cfg_if::cfg_if! {
             if #[cfg(target_board = "pi-pico")] {
                 // This is really only valid for the Pi Pico.
                 const LED_PIN: u32 = 25;
+            } else if #[cfg(target_board = "pi-kb2040")] {
+                // For Adafruit KB2040.
+                const LED_PIN: u32 = 7;
             } else {
                 compile_error!("unrecognized rp2040 board");
             }
