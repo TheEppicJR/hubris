@@ -4,18 +4,19 @@
 
 //! Driver for the AT24CSW080/4 I2C EEPROM
 
+use crate::Validate;
 use core::convert::TryInto;
 use drv_i2c_api::*;
 use userlib::{hl::sleep_for, FromPrimitive, ToPrimitive};
 use zerocopy::{AsBytes, FromBytes};
 
 /// Number of bytes stored in the EEPROM
-const EEPROM_SIZE: u16 = 1024;
+pub const EEPROM_SIZE: u16 = 1024;
 
 /// Wait time after performing a write
 const WRITE_TIME_MS: u64 = 5;
 
-/// The AT23CSW080/4 is an I2C EEPROM used as the FRU ID. It includes 8-Kbit of
+/// The AT24CSW080/4 is an I2C EEPROM used as the FRU ID. It includes 8-Kbit of
 /// memory (arranged as 1024 x 8), software write protection, a 256-bit
 /// Security Register, and various other useful features.
 ///
@@ -24,14 +25,14 @@ const WRITE_TIME_MS: u64 = 5;
 /// limiting, it may be possible to use Acknowledge Polling (section 7.3 of the
 /// datasheet). This would use NAK to indicate that the device is not present,
 /// which has more room for confusion.
-pub struct At24csw080 {
+pub struct At24Csw080 {
     /// We store a `DeviceHandle` instead of an `I2cDevice` to force users
     /// of this API to call either `eeprom()` or `registers()`, since the I2C
     /// address must be dynamically generated.
     device: handle::DeviceHandle,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     /// The low-level I2C communication returned an error
     I2cError(ResponseCode),
@@ -64,6 +65,15 @@ impl From<ResponseCode> for Error {
     }
 }
 
+impl From<Error> for ResponseCode {
+    fn from(err: Error) -> Self {
+        match err {
+            Error::I2cError(code) => code,
+            _ => panic!(),
+        }
+    }
+}
+
 /// Word address for the write-protect register
 ///
 /// According to the datasheet (Table 8-3), this is `11xx_xxxx`; we're filling
@@ -80,13 +90,13 @@ const WPR_PERMANENTLY_LOCK: u8 = 0b0010_0001;
 /// bits with all zeros.
 const SECURITY_REGISTER_WORD_ADDR: u8 = 0b0110_0000;
 
-impl core::fmt::Display for At24csw080 {
+impl core::fmt::Display for At24Csw080 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "at24csw080: {}", &self.device)
     }
 }
 
-impl At24csw080 {
+impl At24Csw080 {
     pub fn new(dev: I2cDevice) -> Self {
         Self {
             device: handle::DeviceHandle::new(dev),
@@ -120,6 +130,26 @@ impl At24csw080 {
         self.device
             .eeprom(addr)
             .read_reg(addr as u8)
+            .map_err(Into::into)
+    }
+
+    /// Reads from the specified address directly into the specified slice.
+    ///
+    /// `addr` and `addr + buf.len()` must be below `EEPROM_SIZE`; otherwise
+    /// this function will return an error.
+    pub fn read_into(&self, addr: u16, buf: &mut [u8]) -> Result<usize, Error> {
+        // Address validation
+        if addr >= EEPROM_SIZE || buf.len() >= u16::MAX as usize {
+            return Err(Error::InvalidAddress(addr));
+        }
+        let end_addr = addr.checked_add(buf.len() as u16).unwrap_or(u16::MAX);
+        if end_addr > EEPROM_SIZE {
+            return Err(Error::InvalidEndAddress(end_addr));
+        }
+
+        self.device
+            .eeprom(addr)
+            .read_reg_into(addr as u8, buf)
             .map_err(Into::into)
     }
 
@@ -254,7 +284,7 @@ impl At24csw080 {
         addr: u8,
         val: u8,
     ) -> Result<(), Error> {
-        if addr < 16 || addr >= 32 {
+        if !(16..32).contains(&addr) {
             return Err(Error::InvalidSecurityRegisterWriteByte(addr));
         }
         let reg_addr = 0b1000_0000 | addr;
@@ -387,8 +417,8 @@ mod handle {
     /// based on EEPROM address and EEPROM vs registers.
     ///
     /// The address stored in the inner `I2cDevice` should have all those bits
-    /// cleared, i.e. it must be 1010_000 for the AT23CSW080 or 1010_100
-    /// for the AT23CSW084.
+    /// cleared, i.e. it must be 1010_000 for the AT24CSW080 or 1010_100
+    /// for the AT24CSW084.
     pub(super) struct DeviceHandle(I2cDevice);
     impl DeviceHandle {
         pub(super) fn new(dev: I2cDevice) -> Self {
@@ -423,5 +453,19 @@ mod handle {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             self.0.fmt(f)
         }
+    }
+}
+
+impl Validate<ResponseCode> for At24Csw080 {
+    fn validate(device: &I2cDevice) -> Result<bool, ResponseCode> {
+        // Read the first byte of the unique ID. This value is not a constant.
+        // Because of their unique addressing scheme however, there can be only
+        // one of these per I2C segment and successfully reading this byte
+        // should be a resonable enough proxy to conclude the device is present
+        // and operational.
+        At24Csw080::new(*device)
+            .read_security_register_byte(0)
+            .map(|_| true)
+            .map_err(Into::into)
     }
 }

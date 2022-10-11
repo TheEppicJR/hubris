@@ -69,13 +69,13 @@ impl Max6634 {
 }
 
 impl TempSensor<Error> for Max6634 {
-    fn read_temperature(&mut self) -> Result<Celsius, Error> {
+    fn read_temperature(&self) -> Result<Celsius, Error> {
         match self
             .device
             .read_reg::<u8, [u8; 2]>(Register::Temperature as u8)
         {
             Ok(buf) => Ok(convert((buf[0], buf[1]))),
-            Err(code) => Err(Error::BadTempRead { code: code }),
+            Err(code) => Err(Error::BadTempRead { code }),
         }
     }
 }

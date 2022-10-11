@@ -53,7 +53,7 @@ use ringbuf::*;
 use userlib::*;
 
 /// The actual requests that we honor from an external source entity
-#[derive(FromPrimitive, Copy, Clone, Debug, PartialEq)]
+#[derive(FromPrimitive, Copy, Clone, Debug, Eq, PartialEq)]
 enum Request {
     None = 0,
     Start = 1,
@@ -62,17 +62,17 @@ enum Request {
     Fault = 4,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Error {
     IllegalTask,
     BadTask,
     BadRequest,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct TaskIndex(u16);
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Trace {
     None,
     Request(Request, TaskIndex),
@@ -82,11 +82,17 @@ enum Trace {
 
 ringbuf!(Trace, 4, Trace::None);
 
+#[no_mangle]
 static JEFE_EXTERNAL_READY: AtomicU32 = AtomicU32::new(0);
+#[no_mangle]
 static JEFE_EXTERNAL_REQUEST: AtomicU32 = AtomicU32::new(0);
+#[no_mangle]
 static JEFE_EXTERNAL_TASKINDEX: AtomicU32 = AtomicU32::new(0);
+#[no_mangle]
 static JEFE_EXTERNAL_KICK: AtomicU32 = AtomicU32::new(0);
+#[no_mangle]
 static JEFE_EXTERNAL_REQUESTS: AtomicU32 = AtomicU32::new(0);
+#[no_mangle]
 static JEFE_EXTERNAL_ERRORS: AtomicU32 = AtomicU32::new(0);
 
 ///
@@ -130,7 +136,7 @@ pub fn check(disposition: &mut [Disposition]) -> bool {
     }
 
     JEFE_EXTERNAL_ERRORS.fetch_add(1, Ordering::SeqCst);
-    return false;
+    false
 }
 
 ///

@@ -5,8 +5,8 @@ name = "lpc55xpresso"
 version = "0.1.0"
 
 [features]
-itm = ["panic-itm", "kern/klog-itm"]
-semihosting = ["panic-semihosting", "kern/klog-semihosting"]
+itm = ["panic-itm"]
+semihosting = ["panic-semihosting"]
 
 [dependencies]
 cortex-m = {version = "0.7", features = ["inline-asm"]}
@@ -14,8 +14,8 @@ cortex-m-rt = "0.6.12"
 panic-itm = { version = "0.4.1", optional = true }
 panic-halt = { version = "0.2.0", optional = true }
 panic-semihosting = { version = "0.5.3", optional = true }
-lpc55-pac = {version = "0.3.0", features = ["rt"]}
-cfg-if = "0.1.10"
+lpc55-pac = {version = "0.4", features = ["rt"]}
+cfg-if = "1"
 abi = { path = "../../sys/abi"}
 
 [dependencies.kern]

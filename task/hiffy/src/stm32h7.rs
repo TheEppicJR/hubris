@@ -55,6 +55,8 @@ pub struct Buffer(u8);
 pub enum Functions {
     Sleep(u16, u32),
     Send((Task, u16, Buffer, usize), u32),
+    SendLeaseRead((Task, u16, Buffer, usize, usize), u32),
+    SendLeaseWrite((Task, u16, Buffer, usize, usize), u32),
     #[cfg(feature = "i2c")]
     I2cRead(
         (Controller, PortIndex, Mux, Segment, u8, u8, usize),
@@ -130,9 +132,18 @@ pub enum Functions {
     HashFinalize((), drv_hash_api::HashError),
     #[cfg(feature = "rng")]
     Rng(usize, drv_rng_api::RngError),
+    #[cfg(feature = "update")]
+    StartUpdate((), drv_update_api::UpdateError),
+    #[cfg(feature = "update")]
+    WriteBlock((usize, usize), drv_update_api::UpdateError),
+    #[cfg(feature = "update")]
+    FinishUpdate((), drv_update_api::UpdateError),
+    #[cfg(feature = "update")]
+    BlockSize((), drv_update_api::UpdateError),
 }
 
 #[cfg(feature = "i2c")]
+#[allow(clippy::type_complexity)] // TODO - type is indeed not fantastic
 fn i2c_args(
     stack: &[Option<u32>],
 ) -> Result<
@@ -174,18 +185,9 @@ fn i2c_args(
 
     let mux = match (stack[2], stack[3]) {
         (Some(mux), Some(segment)) => Some((
-            match Mux::from_u32(mux) {
-                Some(mux) => mux,
-                None => {
-                    return Err(Failure::Fault(Fault::BadParameter(2)));
-                }
-            },
-            match Segment::from_u32(segment) {
-                Some(segment) => segment,
-                None => {
-                    return Err(Failure::Fault(Fault::BadParameter(3)));
-                }
-            },
+            Mux::from_u32(mux).ok_or(Failure::Fault(Fault::BadParameter(2)))?,
+            Segment::from_u32(segment)
+                .ok_or(Failure::Fault(Fault::BadParameter(3)))?,
         )),
         _ => None,
     };
@@ -195,10 +197,7 @@ fn i2c_args(
         None => return Err(Failure::Fault(Fault::EmptyParameter(4))),
     };
 
-    let register = match stack[5] {
-        Some(register) => Some(register as u8),
-        None => None,
-    };
+    let register = stack[5].map(|r| r as u8);
 
     Ok((controller, port, mux, addr, register))
 }
@@ -273,9 +272,7 @@ fn i2c_write(
     }
 
     let len = match stack[stack.len() - 1] {
-        Some(len) if len > 0 && len as usize <= buf.len() - 1 => {
-            Ok(len as usize)
-        }
+        Some(len) if len > 0 && (len as usize) < buf.len() => Ok(len as usize),
         _ => Err(Failure::Fault(Fault::BadParameter(7))),
     }?;
 
@@ -398,7 +395,7 @@ fn gpio_input(
     let task = SYS.get_task_id();
     let gpio = drv_stm32xx_sys_api::Sys::from(task);
 
-    if stack.len() < 1 {
+    if stack.is_empty() {
         return Err(Failure::Fault(Fault::MissingParameters));
     }
 
@@ -546,6 +543,8 @@ fn gpio_configure(
 pub(crate) static HIFFY_FUNCS: &[Function] = &[
     crate::common::sleep,
     crate::common::send,
+    crate::common::send_lease_read,
+    crate::common::send_lease_write,
     #[cfg(feature = "i2c")]
     i2c_read,
     #[cfg(feature = "i2c")]
@@ -592,6 +591,14 @@ pub(crate) static HIFFY_FUNCS: &[Function] = &[
     hash_finalize_sha256,
     #[cfg(feature = "rng")]
     crate::common::rng_fill,
+    #[cfg(feature = "update")]
+    crate::common::start_update,
+    #[cfg(feature = "update")]
+    crate::common::write_block,
+    #[cfg(feature = "update")]
+    crate::common::finish_update,
+    #[cfg(feature = "update")]
+    crate::common::block_size,
 ];
 
 //
@@ -599,6 +606,7 @@ pub(crate) static HIFFY_FUNCS: &[Function] = &[
 // to be able to know function indices, arguments and return values.
 //
 #[no_mangle]
+#[used]
 static HIFFY_FUNCTIONS: Option<&Functions> = None;
 
 pub(crate) fn trace_execute(offset: usize, op: hif::Op) {

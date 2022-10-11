@@ -9,7 +9,7 @@ use drv_i2c_api::*;
 use userlib::units::*;
 
 #[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Register {
     Temp = 0x00,
     Conf = 0x01,
@@ -54,10 +54,10 @@ impl Pct2075 {
 }
 
 impl TempSensor<Error> for Pct2075 {
-    fn read_temperature(&mut self) -> Result<Celsius, Error> {
+    fn read_temperature(&self) -> Result<Celsius, Error> {
         match self.device.read_reg::<u8, [u8; 2]>(Register::Temp as u8) {
             Ok(buf) => Ok(convert((buf[0], buf[1]))),
-            Err(code) => Err(Error::BadTempRead { code: code }),
+            Err(code) => Err(Error::BadTempRead { code }),
         }
     }
 }

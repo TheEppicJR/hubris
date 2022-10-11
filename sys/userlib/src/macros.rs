@@ -11,13 +11,13 @@ cfg_if::cfg_if! {
         macro_rules! sys_log {
             ($s:expr) => {
                 unsafe {
-                    let stim = &mut (*cortex_m::peripheral::ITM::ptr()).stim[1];
+                    let stim = &mut (*cortex_m::peripheral::ITM::PTR).stim[1];
                     cortex_m::iprintln!(stim, $s);
                 }
             };
             ($s:expr, $($tt:tt)*) => {
                 unsafe {
-                    let stim = &mut (*cortex_m::peripheral::ITM::ptr()).stim[1];
+                    let stim = &mut (*cortex_m::peripheral::ITM::PTR).stim[1];
                     cortex_m::iprintln!(stim, $s, $($tt)*);
                 }
             };
@@ -45,8 +45,8 @@ cfg_if::cfg_if! {
             };
         }
     } else {
-        // Note: we provide macros that contain compiler_error, instead of just
-        // using compiler_error here, to allow programs to omit these features
+        // Note: we provide macros that contain compile_error, instead of just
+        // using compile_error here, to allow programs to omit these features
         // if they don't use logging.
 
         #[macro_export]

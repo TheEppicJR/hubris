@@ -5,7 +5,7 @@
 use crate::{Phy, PhyRw, VscError};
 use vsc7448_pac::phy;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LED {
     LED0 = 0,
     LED1,
@@ -13,7 +13,7 @@ pub enum LED {
     LED3,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LEDMode {
     LinkActivity = 0,
     Link1000Activity,
@@ -35,7 +35,7 @@ pub enum LEDMode {
 
 impl<'a, P: PhyRw> Phy<'a, P> {
     pub fn set_led_mode(
-        &mut self,
+        &self,
         led: LED,
         mode: LEDMode,
     ) -> Result<(), VscError> {

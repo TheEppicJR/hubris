@@ -3,21 +3,22 @@
 Interface(
     name: "Sequencer",
     ops: {
-        "get_state": (
-            doc: "Return the power state",
+        "tofino_seq_policy": (
+            doc: "Return the active sequencer policy for Tofino",
+            args: {},
             reply: Result(
                 ok: (
-                    type: "PowerState",
+                    type: "TofinoSequencerPolicy",
                     recv: FromPrimitive("u8"),
                 ),
                 err: CLike("SeqError"),
             ),
         ),
-        "set_state": (
+        "set_tofino_seq_policy": (
             doc: "Set the power state",
             args: {
-                "state": (
-                    type: "PowerState",
+                "policy": (
+                    type: "TofinoSequencerPolicy",
                     recv: FromPrimitive("u8"),
                 )
             },
@@ -26,6 +27,107 @@ Interface(
                 err: CLike("SeqError"),
             ),
         ),
+        "tofino_seq_state": (
+            doc: "Return the Tofino sequencer state",
+            reply: Result(
+                ok: (
+                    type: "TofinoSeqState",
+                    recv: FromPrimitive("u8"),
+                ),
+                err: CLike("SeqError"),
+            ),
+        ),
+        "tofino_seq_error": (
+            doc: "Return the Tofino sequencer error, if any",
+            reply: Result(
+                ok: (
+                    type: "TofinoSeqError",
+                    recv: FromPrimitive("u8"),
+                ),
+                err: CLike("SeqError"),
+            ),
+        ),
+        "clear_tofino_seq_error": (
+            doc: "Clear the Tofino sequencer error state",
+            args: {},
+            reply: Result(
+                ok: "()",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "tofino_power_status": (
+            doc: "Return the Tofino sequencer power registers",
+            reply: Result(
+                ok: "u32",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "tofino_pcie_hotplug_ctrl": (
+            doc: "Return the PCIe hotplug control register",
+            reply: Result(
+                ok: "u8",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "set_tofino_pcie_hotplug_ctrl": (
+            doc: "Set bits in the Tofino PCIe endpoint CTRL register",
+            args: {
+                "mask": "u8",
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "clear_tofino_pcie_hotplug_ctrl": (
+            doc: "Clear bits in the Tofino PCIe endpoint CTRL register",
+            args: {
+                "mask": "u8",
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "tofino_pcie_hotplug_status": (
+            doc: "Return the PCIe hotplug status register",
+            reply: Result(
+                ok: "u8",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "tofino_pcie_reset": (
+            doc: "Return the state of Tofino PCIe reset",
+            reply: Result(
+                ok: (
+                    type: "TofinoPcieReset",
+                    recv: FromPrimitive("u8"),
+                ),
+                err: CLike("SeqError"),
+            ),
+        ),
+        "set_tofino_pcie_reset": (
+            doc: "Return the state of Tofino PCIe reset",
+            args: {
+                "reset": (
+                    type: "TofinoPcieReset",
+                    recv: FromPrimitive("u8"),
+                ),
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("SeqError"),
+            ),
+        ),
+
+        "is_clock_config_loaded": (
+            args: {},
+            reply: Result(
+                ok: "bool",
+                err: CLike("SeqError"),
+            ),
+        ),
+
         "load_clock_config": (
             args: {},
             reply: Result(
@@ -33,10 +135,18 @@ Interface(
                 err: CLike("SeqError"),
             ),
         ),
-        "is_clock_config_loaded": (
+
+        "front_io_board_present": (
             args: {},
             reply: Result(
-                ok: "u8",
+                ok: "bool",
+                err: CLike("SeqError"),
+            ),
+        ),
+        "front_io_phy_ready": (
+            args: {},
+            reply: Result(
+                ok: "bool",
                 err: CLike("SeqError"),
             ),
         ),

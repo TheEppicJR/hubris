@@ -6,19 +6,19 @@ SECTIONS
 {
   PROVIDE(_stack_start = ORIGIN(STACK) + LENGTH(STACK));
 
-  PROVIDE(_stext = ORIGIN(FLASH));
-
   /* ### .text */
-  .text _stext :
-  {
+  .text : {
+    _stext = .;
     *(.text.start*); /* try and pull start symbol to beginning */
     *(.text .text.*);
     . = ALIGN(4);
     __etext = .;
   } > FLASH =0xdededede
 
+  INCLUDE trustzone.x
+
   /* ### .rodata */
-  .rodata __etext : ALIGN(4)
+  .rodata : ALIGN(4)
   {
     *(.rodata .rodata.*);
 
@@ -30,30 +30,18 @@ SECTIONS
   } > FLASH
 
   /*
-   * Table of entry points for Hubris to get into the bootloader.
-   * table.ld containing the actual bytes is generated at runtime.
-   * Note the ALIGN requirement comes from TrustZone requirements.
-   */
-  .addr_table __erodata : ALIGN(32) {
-    __bootloader_fn_table = .;
-    INCLUDE table.ld
-    __end_flash = .;
-  } > FLASH
-
-  /*
    * Sections in RAM
    *
    * NOTE: the userlib runtime assumes that these sections
    * are 4-byte aligned and padded to 4-byte boundaries.
    */
-  .data : AT(__end_flash) ALIGN(4)
-  {
+  .data : ALIGN(4) {
     . = ALIGN(4);
     __sdata = .;
     *(.data .data.*);
     . = ALIGN(4); /* 4-byte align the end (VMA) of this section */
     __edata = .;
-  } > RAM
+  } > RAM AT>FLASH
 
   /*
    * Fill the remaining flash space with a known value

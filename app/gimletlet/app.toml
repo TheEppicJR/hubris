@@ -1,13 +1,13 @@
 name = "gimletlet"
 target = "thumbv7em-none-eabihf"
 board = "gimletlet-2"
-chip = "../../chips/stm32h7.toml"
+chip = "../../chips/stm32h7"
+memory = "memory-large.toml"
 stacksize = 896
 
 [kernel]
-path = "."
 name = "gimletlet"
-requires = {flash = 32768, ram = 4096}
+requires = {flash = 32768, ram = 8192}
 #
 # For the kernel (and for any task that logs), we are required to enable
 # either "itm" (denoting logging/panicking via ARM's Instrumentation Trace
@@ -20,57 +20,36 @@ requires = {flash = 32768, ram = 4096}
 #
 features = ["itm"]
 
-[supervisor]
-notification = 1
-
-# Flash sections are mapped into flash bank 1 (of 2).
-[outputs.flash]
-address = 0x08000000
-size = 1048576
-read = true
-execute = true
-
-# RAM sections are currently mapped into DTCM, a small but fast SRAM.
-[outputs.ram]
-address = 0x20000000
-size = 131072
-read = true
-write = true
-execute = false  # let's assume XN until proven otherwise
-
-# Network buffers are placed in sram1, which is directly accessible by the
-# Ethernet MAC.
-[outputs.sram1]
-address = 0x30000000
-size = 0x20000
-read = true
-write = true
-dma = true
-
 [tasks.jefe]
-path = "../../task/jefe"
 name = "task-jefe"
 priority = 0
-requires = {flash = 8192, ram = 2048}
+max-sizes = {flash = 8192, ram = 2048}
 start = true
 features = ["itm"]
 stacksize = 1536
 
+[tasks.jefe.config.on-state-change]
+host_sp_comms = {bit-number = 1}
+
+[tasks.jefe.config.allowed-callers]
+set_state = ["gimlet_seq"]
+set_reset_reason = ["sys"]
+request_reset = ["hiffy", "mgmt_gateway"]
+
 [tasks.sys]
-path = "../../drv/stm32xx-sys"
 name = "drv-stm32xx-sys"
 features = ["h753"]
 priority = 1
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 uses = ["rcc", "gpios1", "gpios2", "gpios3"]
 start = true
+task-slots = ["jefe"]
 
 [tasks.i2c_driver]
-path = "../../drv/stm32h7-i2c-server"
-name = "drv-stm32h7-i2c-server"
+name = "drv-stm32xx-i2c-server"
 features = ["h753", "itm"]
 priority = 2
-requires = {flash = 16384, ram = 2048}
+max-sizes = {flash = 16384, ram = 2048}
 uses = ["i2c2", "i2c3", "i2c4"]
 start = true
 task-slots = ["sys"]
@@ -84,10 +63,9 @@ task-slots = ["sys"]
 "i2c4.error" = 0b0000_1000
 
 [tasks.spi_driver]
-path = "../../drv/stm32h7-spi-server"
 name = "drv-stm32h7-spi-server"
 priority = 2
-requires = {flash = 16384, ram = 2048}
+max-sizes = {flash = 16384, ram = 2048}
 features = ["spi4", "h753"]
 uses = ["spi4"]
 start = true
@@ -99,50 +77,63 @@ task-slots = ["sys"]
 global_config = "spi4"
 
 [tasks.user_leds]
-path = "../../drv/user-leds"
 name = "drv-user-leds"
 features = ["stm32h7"]
 priority = 2
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 start = true
 task-slots = ["sys"]
 
+[tasks.gimlet_seq]
+name = "drv-mock-gimlet-seq-server"
+priority = 2
+max-sizes = {flash = 2048, ram = 1024 }
+start = true
+task-slots = ["jefe"]
+
 [tasks.pong]
-path = "../../task/pong"
 name = "task-pong"
 priority = 3
-requires = {flash = 1024, ram = 1024}
+max-sizes = {flash = 1024, ram = 1024}
 start = true
 task-slots = ["user_leds"]
 
 [tasks.uartecho]
-path = "../../task/uartecho"
 name = "task-uartecho"
-features = ["stm32h743", "usart2"]
+features = ["stm32h753", "usart2", "baud_rate_3M", "hardware_flow_control"]
 uses = ["usart2"]
-interrupts = {"usart2.irq" = 1}
+interrupts = {"usart2.irq" = 0b01}
 priority = 3
-requires = {flash = 8192, ram = 4096}
+max-sizes = {flash = 16384, ram = 4096}
 stacksize = 2048
 start = true
 task-slots = ["sys"]
 
-[tasks.hiffy]
-path = "../../task/hiffy"
-name = "task-hiffy"
-features = ["h753", "stm32h7", "itm", "i2c", "gpio", "spi", "qspi", "rng"]
+[tasks.host_sp_comms]
+name = "task-host-sp-comms"
+features = ["stm32h753", "uart7", "baud_rate_3M", "hardware_flow_control"]
+uses = ["uart7"]
+interrupts = {"uart7.irq" = 0b01}
 priority = 3
-requires = {flash = 32768, ram = 32768}
+max-sizes = {flash = 16384, ram = 16384}
 stacksize = 2048
 start = true
-task-slots = ["hf", "sys", "i2c_driver", "user_leds", "rng_driver"]
+task-slots = ["sys", "gimlet_seq"]
+
+[tasks.hiffy]
+name = "task-hiffy"
+features = ["h753", "stm32h7", "itm", "i2c", "gpio", "spi", "qspi", "rng", "update"]
+priority = 4
+max-sizes = {flash = 32768, ram = 32768}
+stacksize = 2048
+start = true
+task-slots = ["hf", "sys", "i2c_driver", "user_leds", "rng_driver", "update_server"]
 
 [tasks.hf]
-path = "../../drv/gimlet-hf-server"
 name = "drv-gimlet-hf-server"
 features = ["h753"]
 priority = 3
-requires = {flash = 16384, ram = 2048}
+max-sizes = {flash = 16384, ram = 2048}
 stacksize = 1920
 start = true
 uses = ["quadspi"]
@@ -150,55 +141,73 @@ interrupts = {"quadspi.irq" = 1}
 task-slots = ["sys"]
 
 [tasks.net]
-path = "../../task/net"
 name = "task-net"
-stacksize = 4320
-priority = 2
-features = ["h753", "h7-vlan", "gimletlet-nic"]
-requires = {flash = 65536, ram = 16384, sram1 = 16384}
+stacksize = 3800
+priority = 3
+features = ["h753", "vlan", "gimletlet-nic"]
+max-sizes = {flash = 65536, ram = 32768, sram1 = 16384}
 sections = {eth_bulk = "sram1"}
-uses = ["eth", "eth_dma", "system_flash"]
+uses = ["eth", "eth_dma", "system_flash", "tim16"]
 start = true
-interrupts = {"eth.irq" = 0b1}
+interrupts = {"eth.irq" = 0b1, "tim16.irq" = 0b10}
 task-slots = ["sys", "spi_driver" ]
 
 [tasks.udpecho]
-path = "../../task/udpecho"
 name = "task-udpecho"
-priority = 3
-requires = {flash = 8192, ram = 8192}
+priority = 4
+max-sizes = {flash = 8192, ram = 8192}
 stacksize = 4096
 start = true
 task-slots = ["net"]
 features = ["vlan"]
 
+[tasks.mgmt_gateway]
+name = "task-mgmt-gateway"
+priority = 4
+max-sizes = {flash = 65536, ram = 16384}
+stacksize = 2048
+start = true
+uses = [
+    "usart1",
+    "system_flash", # TODO also used by `net`, both to read the stm32 uid
+]
+task-slots = ["jefe", "net", "update_server", "sys", "hf", "gimlet_seq"]
+features = ["gimlet", "usart1", "vlan", "baud_rate_3M", "hardware_flow_control"]
+interrupts = {"usart1.irq" = 0b10}
+
 [tasks.validate]
-path = "../../task/validate"
 name = "task-validate"
 priority = 3
-requires = {flash = 32768, ram = 4096}
-stacksize = 1024 
+max-sizes = {flash = 32768, ram = 4096}
+stacksize = 1024
 start = true
 task-slots = ["i2c_driver"]
 
 [tasks.idle]
-path = "../../task/idle"
 name = "task-idle"
 priority = 5
-requires = {flash = 128, ram = 256}
+max-sizes = {flash = 128, ram = 256}
 stacksize = 256
 start = true
 
 [tasks.rng_driver]
 features = ["h753"]
-path = "../../drv/stm32h7-rng"
 name = "drv-stm32h7-rng"
-priority = 2
-requires = {flash = 8192, ram = 512}
+priority = 3
+max-sizes = {flash = 8192, ram = 512}
 uses = ["rng"]
 start = true
 stacksize = 256
 task-slots = ["sys", "user_leds"]
+
+[tasks.update_server]
+name = "stm32h7-update-server"
+priority = 3
+max-sizes = {flash = 16384, ram = 4096}
+stacksize = 2048
+start = true
+uses = ["flash_controller", "bank2"]
+interrupts = {"flash_controller.irq" = 0b1}
 
 [config]
 [[config.i2c.controllers]]
@@ -272,3 +281,10 @@ owner = {name = "udpecho", notification = 1}
 port = 7
 tx = { packets = 3, bytes = 1024 }
 rx = { packets = 3, bytes = 1024 }
+
+[config.net.sockets.mgmt_gateway]
+kind = "udp"
+owner = {name = "mgmt_gateway", notification = 0b01}
+port = 11111 # TODO do we have a documented port for MGS traffic?
+tx = { packets = 3, bytes = 2048 }
+rx = { packets = 3, bytes = 2048 }

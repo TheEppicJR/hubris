@@ -1,11 +1,10 @@
 name = "gimletlet-mgmt"
 target = "thumbv7em-none-eabihf"
 board = "gimletlet-1"
-chip = "../../chips/stm32h7.toml"
+chip = "../../chips/stm32h7"
 stacksize = 1024
 
 [kernel]
-path = "."
 name = "gimletlet"
 requires = {flash = 32768, ram = 4096}
 #
@@ -20,56 +19,31 @@ requires = {flash = 32768, ram = 4096}
 #
 features = ["itm"]
 
-[supervisor]
-notification = 1
-
-# Flash sections are mapped into flash bank 1 (of 2).
-[outputs.flash]
-address = 0x08000000
-size = 1048576
-read = true
-execute = true
-
-# RAM sections are currently mapped into DTCM, a small but fast SRAM.
-[outputs.ram]
-address = 0x20000000
-size = 131072
-read = true
-write = true
-execute = false  # let's assume XN until proven otherwise
-
-# Network buffers are placed in sram1, which is directly accessible by the
-# Ethernet MAC.
-[outputs.sram1]
-address = 0x30000000
-size = 0x20000
-read = true
-write = true
-dma = true
-
 [tasks.jefe]
-path = "../../task/jefe"
 name = "task-jefe"
 priority = 0
-requires = {flash = 8192, ram = 2048}
+max-sizes = {flash = 8192, ram = 2048}
 start = true
 features = ["itm"]
 stacksize = 1536
 
+[tasks.jefe.config.allowed-callers]
+set_reset_reason = ["sys"]
+request_reset = ["hiffy"]
+
 [tasks.sys]
-path = "../../drv/stm32xx-sys"
 name = "drv-stm32xx-sys"
 features = ["h753"]
 priority = 1
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 uses = ["rcc", "gpios1", "gpios2", "gpios3"]
 start = true
+task-slots = ["jefe"]
 
 [tasks.spi2_driver]
-path = "../../drv/stm32h7-spi-server"
 name = "drv-stm32h7-spi-server"
 priority = 2
-requires = {flash = 16384, ram = 4096}
+max-sizes = {flash = 16384, ram = 4096}
 features = ["spi2", "h753"]
 uses = ["spi2"]
 start = true
@@ -81,51 +55,46 @@ task-slots = ["sys"]
 global_config = "spi2"
 
 [tasks.user_leds]
-path = "../../drv/user-leds"
 name = "drv-user-leds"
 features = ["stm32h7"]
 priority = 2
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 start = true
 task-slots = ["sys"]
 
 [tasks.hiffy]
-path = "../../task/hiffy"
 name = "task-hiffy"
 features = ["h753", "stm32h7", "itm", "gpio", "spi"]
 priority = 3
-requires = {flash = 16384, ram = 16384 }
+max-sizes = {flash = 16384, ram = 16384 }
 stacksize = 2048
 start = true
 task-slots = ["sys", "user_leds"]
 
 [tasks.net]
-path = "../../task/net"
 name = "task-net"
-stacksize = 3800
-priority = 2
+stacksize = 3000
+priority = 3
 features = ["mgmt", "h753"]
-requires = {flash = 131072, ram = 16384, sram1 = 16384}
+max-sizes = {flash = 131072, ram = 16384, sram1 = 16384}
 sections = {eth_bulk = "sram1"}
-uses = ["eth", "eth_dma", "system_flash"]
+uses = ["eth", "eth_dma", "system_flash", "tim16"]
 start = true
-interrupts = {"eth.irq" = 0b1}
+interrupts = {"eth.irq" = 0b1, "tim16.irq" = 0b10}
 task-slots = ["sys", "user_leds", { spi_driver = "spi2_driver" }]
 
 [tasks.udpecho]
-path = "../../task/udpecho"
 name = "task-udpecho"
-priority = 3
-requires = {flash = 16384, ram = 8192}
+priority = 4
+max-sizes = {flash = 16384, ram = 8192}
 stacksize = 4096
 start = true
 task-slots = ["net"]
 
 [tasks.idle]
-path = "../../task/idle"
 name = "task-idle"
 priority = 5
-requires = {flash = 128, ram = 256}
+max-sizes = {flash = 128, ram = 256}
 stacksize = 256
 start = true
 

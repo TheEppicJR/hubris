@@ -17,12 +17,14 @@ cfg_if::cfg_if! {
         cfg_if::cfg_if! {
             if #[cfg(feature = "model-stm32g031")] {
                 use pac::stm32g031 as device;
+            } else if #[cfg(feature = "model-stm32g030")] {
+                use pac::stm32g030 as device;
             } else if #[cfg(feature = "model-stm32g070")] {
                 use pac::stm32g070 as device;
             } else if #[cfg(feature = "model-stm32g0b1")] {
                 use pac::stm32g0b1 as device;
             } else {
-                compiler_error!("unsupported or missing SoC model feature");
+                compile_error!("unsupported or missing SoC model feature");
             }
         }
     } else if #[cfg(feature = "family-stm32h7")] {
@@ -33,11 +35,11 @@ cfg_if::cfg_if! {
             } else if #[cfg(feature = "model-stm32h753")] {
                 use pac::stm32h753 as device;
             } else {
-                compiler_error!("unsupported or missing SoC model feature");
+                compile_error!("unsupported or missing SoC model feature");
             }
         }
     } else {
-        compiler_error!("unsupported or missing SoC family feature");
+        compile_error!("unsupported or missing SoC family feature");
     }
 }
 

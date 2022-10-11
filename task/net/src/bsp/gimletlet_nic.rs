@@ -7,25 +7,25 @@ use drv_spi_api::Spi;
 use drv_stm32h7_eth as eth;
 use drv_stm32xx_sys_api::{Alternate, Port, Sys};
 use ksz8463::{
-    Error as KszError, Ksz8463, MIBCounter, MIBCounterValue,
+    Error as RawKszError, Ksz8463, MIBCounter, MIBCounterValue,
     Register as KszRegister,
 };
 use ringbuf::*;
+use task_net_api::PhyError;
 use userlib::{hl::sleep_for, task_slot};
+use vsc7448_pac::types::PhyRegisterAddress;
 
 task_slot!(SPI, spi_driver);
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Trace {
     None,
     BspConfigured,
 
-    KszErr { err: KszError },
+    KszErr { err: RawKszError },
     Ksz8463Status { port: u8, status: u16 },
     Ksz8463Control { port: u8, control: u16 },
     Ksz8463Counter { port: u8, counter: MIBCounterValue },
-    Ksz8463MacTable(ksz8463::MacTableEntry),
-    Ksz8463EmptyMacTable,
 }
 ringbuf!(Trace, 32, Trace::None);
 
@@ -65,9 +65,13 @@ impl Bsp {
             // Initialize the KSZ8463 (using SPI4_RESET, PB10)
             sys.gpio_init_reset_pulse(Port::B.pin(10), 10, 1).unwrap();
             let ksz8463 = Ksz8463::new(ksz8463_spi);
-            match ksz8463
-                .configure(ksz8463::Mode::Copper, ksz8463::VLanMode::Mandatory)
-            {
+
+            #[cfg(feature = "vlan")]
+            let vlan_mode = ksz8463::VLanMode::Mandatory;
+            #[cfg(not(feature = "vlan"))]
+            let vlan_mode = ksz8463::VLanMode::Optional;
+
+            match ksz8463.configure(ksz8463::Mode::Copper, vlan_mode) {
                 Err(err) => {
                     ringbuf_entry!(Trace::KszErr { err });
                     sleep_for(100);
@@ -101,13 +105,31 @@ impl Bsp {
                 Ok(counter) => Trace::Ksz8463Counter { port, counter },
                 Err(err) => Trace::KszErr { err },
             });
-
-            // Read the MAC table for fun
-            ringbuf_entry!(match self.ksz8463.read_dynamic_mac_table(0) {
-                Ok(Some(mac)) => Trace::Ksz8463MacTable(mac),
-                Ok(None) => Trace::Ksz8463EmptyMacTable,
-                Err(err) => Trace::KszErr { err },
-            });
         }
+    }
+
+    /// Calls a function on a `Phy` associated with the given port.
+    pub fn phy_read(
+        &mut self,
+        _port: u8,
+        _reg: PhyRegisterAddress<u16>,
+        _eth: &eth::Ethernet,
+    ) -> Result<u16, PhyError> {
+        Err(PhyError::NotImplemented)
+    }
+
+    /// Calls a function on a `Phy` associated with the given port.
+    pub fn phy_write(
+        &mut self,
+        _port: u8,
+        _reg: PhyRegisterAddress<u16>,
+        _value: u16,
+        _eth: &eth::Ethernet,
+    ) -> Result<u16, PhyError> {
+        Err(PhyError::NotImplemented)
+    }
+
+    pub fn ksz8463(&self) -> &Ksz8463 {
+        &self.ksz8463
     }
 }

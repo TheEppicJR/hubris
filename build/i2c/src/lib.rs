@@ -18,12 +18,13 @@ use std::path::Path;
 // build-specific types; we must not set `deny_unknown_fields` here.
 //
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct Config {
     i2c: I2cConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct I2cConfig {
     controllers: Vec<I2cController>,
     devices: Option<Vec<I2cDevice>>,
@@ -44,7 +45,7 @@ struct I2cConfig {
 // ordering.
 //
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct I2cController {
     controller: u8,
     ports: BTreeMap<String, I2cPort>,
@@ -63,7 +64,7 @@ struct I2cController {
 // additional lengths to assure that these mistakes are caught in compilation.
 //
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 #[allow(dead_code)]
 struct I2cDevice {
     /// device part name
@@ -108,7 +109,7 @@ struct I2cDevice {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct I2cPort {
     name: Option<String>,
     #[allow(dead_code)]
@@ -127,7 +128,7 @@ struct I2cPinSet {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct I2cMux {
     driver: String,
     address: u8,
@@ -135,14 +136,14 @@ struct I2cMux {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct I2cPmbus {
     rails: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 #[allow(dead_code)]
 struct I2cSensors {
     #[serde(default)]
@@ -159,9 +160,11 @@ struct I2cSensors {
 
     #[serde(default)]
     speed: usize,
+
+    names: Option<Vec<String>>,
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub enum Disposition {
     /// controller is an initiator
     Initiator,
@@ -249,11 +252,11 @@ impl ConfigGenerator {
             //
             for (index, (p, port)) in c.ports.iter().enumerate() {
                 if let Some(name) = &port.name {
-                    match buses.insert(name.clone(), (c.controller, index)) {
-                        Some(_) => {
-                            panic!("i2c bus {} appears twice", name);
-                        }
-                        None => {}
+                    if buses
+                        .insert(name.clone(), (c.controller, index))
+                        .is_some()
+                    {
+                        panic!("i2c bus {} appears twice", name);
                     }
                 }
 
@@ -302,12 +305,12 @@ impl ConfigGenerator {
 
         Self {
             output: String::new(),
-            disposition: disposition,
-            controllers: controllers,
-            buses: buses,
-            ports: ports,
-            singletons: singletons,
-            devices: i2c.devices.unwrap_or(Vec::new()),
+            devices: i2c.devices.unwrap_or_default(),
+            disposition,
+            controllers,
+            buses,
+            ports,
+            singletons,
         }
     }
 
@@ -339,13 +342,16 @@ impl ConfigGenerator {
         writeln!(
             &mut s,
             r##"
-    use drv_stm32h7_i2c::I2cController;
+    #[allow(dead_code)]
+    pub const NCONTROLLERS: usize = {ncontrollers};
 
-    pub fn controllers() -> [I2cController<'static>; {}] {{"##,
-            self.controllers.len()
+    use drv_stm32xx_i2c::I2cController;
+
+    pub fn controllers() -> [I2cController<'static>; NCONTROLLERS] {{"##,
+            ncontrollers = self.controllers.len()
         )?;
 
-        if self.controllers.len() > 0 {
+        if !self.controllers.is_empty() {
             writeln!(
                 &mut s,
                 r##"
@@ -359,7 +365,10 @@ impl ConfigGenerator {
         use stm32h7::stm32h753 as device;
 
         #[cfg(feature = "h7b3")]
-        use stm32h7::stm32h7b3 as device;"##
+        use stm32h7::stm32h7b3 as device;
+
+        #[cfg(feature = "g031")]
+        use stm32g0::stm32g031 as device;"##
             )?;
         }
 
@@ -376,10 +385,11 @@ impl ConfigGenerator {
             I2cController {{
                 controller: Controller::I2C{controller},
                 peripheral: Peripheral::I2c{controller},
-                notification: (1 << ({controller} - 1)),
+                notification: (1 << {shift}),
                 registers: unsafe {{ &*device::I2C{controller}::ptr() }},
             }},"##,
-                controller = c.controller
+                shift = c.controller - 1,
+                controller = c.controller,
             )?;
         }
 
@@ -406,7 +416,7 @@ impl ConfigGenerator {
         }
 
         for c in &self.controllers {
-            for (_, port) in &c.ports {
+            for port in c.ports.values() {
                 len += port.pins.len();
             }
         }
@@ -414,7 +424,7 @@ impl ConfigGenerator {
         writeln!(
             &mut s,
             r##"
-    use drv_stm32h7_i2c::I2cPin;
+    use drv_stm32xx_i2c::I2cPin;
 
     pub fn pins() -> [I2cPin; {}] {{"##,
             len
@@ -483,10 +493,15 @@ impl ConfigGenerator {
         }
 
         let mut s = &mut self.output;
+        let mut nmuxedbuses = 0;
         let mut len = 0;
 
         for c in &self.controllers {
-            for (_, port) in &c.ports {
+            for port in c.ports.values() {
+                if !port.muxes.is_empty() {
+                    nmuxedbuses += 1;
+                }
+
                 len += port.muxes.len();
             }
         }
@@ -494,7 +509,10 @@ impl ConfigGenerator {
         write!(
             &mut s,
             r##"
-    use drv_stm32h7_i2c::I2cMux;
+    #[allow(dead_code)]
+    pub const NMUXEDBUSES: usize = {nmuxedbuses};
+
+    use drv_stm32xx_i2c::I2cMux;
 
     pub fn muxes() -> [I2cMux<'static>; {}] {{"##,
             len
@@ -552,7 +570,7 @@ impl ConfigGenerator {
 
                     let driver_struct = format!(
                         "{}{}",
-                        (&mux.driver[..1].to_string()).to_uppercase(),
+                        mux.driver[..1].to_uppercase(),
                         &mux.driver[1..]
                     );
 
@@ -563,7 +581,7 @@ impl ConfigGenerator {
                 controller: Controller::I2C{controller},
                 port: PortIndex({i2c_port}),
                 id: Mux::M{mindex},
-                driver: &drv_stm32h7_i2c::{driver}::{driver_struct},
+                driver: &drv_stm32xx_i2c::{driver}::{driver_struct},
                 enable: {enable},
                 address: {address:#x},
             }},"##,
@@ -768,23 +786,6 @@ impl ConfigGenerator {
     }
 
     pub fn generate_validation(&mut self) -> Result<()> {
-        write!(
-            &mut self.output,
-            r##"
-    pub mod validation {{
-        use drv_i2c_api::{{I2cDevice, Controller, PortIndex}};
-        use drv_i2c_devices::Validate;
-        use userlib::TaskId;
-
-        pub enum I2cValidation {{
-            RawReadOk,
-            Good,
-            Bad,
-        }}
-
-"##
-        )?;
-
         //
         // Lord, have mercy: we are going to find the crate containing i2c
         // devices, and go fishing for where we believe the device drivers
@@ -828,6 +829,21 @@ impl ConfigGenerator {
         write!(
             &mut self.output,
             r##"
+    pub mod validation {{
+        #[allow(unused_imports)]
+        use drv_i2c_api::{{I2cDevice, Controller, PortIndex}};
+        #[allow(unused_imports)]
+        use drv_i2c_devices::Validate;
+        use userlib::TaskId;
+
+        #[allow(dead_code)]
+        pub enum I2cValidation {{
+            RawReadOk,
+            Good,
+            Bad,
+        }}
+
+        #[allow(unused_variables)]
         pub fn validate(
             task: TaskId,
             index: usize,
@@ -884,7 +900,7 @@ impl ConfigGenerator {
             if let Some(pmbus) = &d.pmbus {
                 if let Some(rails) = &pmbus.rails {
                     for (index, rail) in rails.iter().enumerate() {
-                        if rail.len() == 0 {
+                        if rail.is_empty() {
                             continue;
                         }
 
@@ -994,6 +1010,16 @@ impl ConfigGenerator {
                 } else {
                     d.name.clone()
                 }
+            } else if let Some(names) = &d.sensors.as_ref().unwrap().names {
+                if idx >= names.len() {
+                    panic!(
+                        "name array is too short ({}) for sensor index ({})",
+                        names.len(),
+                        idx
+                    );
+                } else {
+                    Some(names[idx].clone())
+                }
             } else {
                 d.name.clone()
             };
@@ -1020,23 +1046,23 @@ impl ConfigGenerator {
         for d in &self.devices {
             if let Some(s) = &d.sensors {
                 for i in 0..s.temperature {
-                    add_sensor(Sensor::Temperature, &d, i);
+                    add_sensor(Sensor::Temperature, d, i);
                 }
 
                 for i in 0..s.power {
-                    add_sensor(Sensor::Power, &d, i);
+                    add_sensor(Sensor::Power, d, i);
                 }
 
                 for i in 0..s.current {
-                    add_sensor(Sensor::Current, &d, i);
+                    add_sensor(Sensor::Current, d, i);
                 }
 
                 for i in 0..s.voltage {
-                    add_sensor(Sensor::Voltage, &d, i);
+                    add_sensor(Sensor::Voltage, d, i);
                 }
 
                 for i in 0..s.speed {
-                    add_sensor(Sensor::Speed, &d, i);
+                    add_sensor(Sensor::Speed, d, i);
                 }
             }
         }

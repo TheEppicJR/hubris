@@ -8,13 +8,14 @@ Interface(
             doc: "Unqueues an incoming packet from a socket.",
             args: {
                 "socket": "SocketName",
+                "large_payload_behavior": "LargePayloadBehavior",
             },
             leases: {
                 "payload": (type: "[u8]", write: true),
             },
             reply: Result(
                 ok: "UdpMetadata",
-                err: CLike("NetError"),
+                err: CLike("RecvError"),
             ),
         ),
         "send_packet": (
@@ -29,7 +30,7 @@ Interface(
             },
             reply: Result(
                 ok: "()",
-                err: CLike("NetError"),
+                err: CLike("SendError"),
             ),
         ),
         "smi_read": (
@@ -40,7 +41,7 @@ Interface(
             },
             reply: Result(
                 ok: "u16",
-                err: CLike("NetError"),
+                err: ServerDeath,
             ),
         ),
         "smi_write": (
@@ -52,8 +53,83 @@ Interface(
             },
             reply: Result(
                 ok: "()",
-                err: CLike("NetError"),
+                err: ServerDeath,
             ),
+        ),
+        "read_phy_reg": (
+            doc: "Read a register from the PHY associated with a particular port",
+            args: {
+                "port": "u8",
+                "page": "u16",
+                "reg": "u8",
+            },
+            reply: Result(
+                ok: "u16",
+                err: CLike("PhyError"),
+            ),
+        ),
+        "write_phy_reg": (
+            doc: "Writes a register in the PHY associated with a particular port",
+            args: {
+                "port": "u8",
+                "page": "u16",
+                "reg": "u8",
+                "value": "u16",
+            },
+            reply: Result(
+                ok: "()",
+                err: CLike("PhyError"),
+            ),
+        ),
+        "read_ksz8463_mac_count": (
+            doc: "Returns the number of entries in the KSZ8463 dynamic MAC table",
+            reply: Result(
+                ok: "usize",
+                err: CLike("KszError"),
+            ),
+        ),
+        "read_ksz8463_mac": (
+            doc: "Reads a particular MAC address from the KSZ8463 dynamic MAC table",
+            args: {
+                "i": "u16",
+            },
+            reply: Result(
+                ok: "KszMacTableEntry",
+                err: CLike("KszError"),
+            ),
+        ),
+        "read_ksz8463_reg": (
+            doc: "Reads a register from the KSZ8463",
+            args: {
+                "reg": "u16",
+            },
+            reply: Result(
+                ok: "u16",
+                err: CLike("KszError"),
+            ),
+        ),
+        "get_mac_address": (
+            doc: "Reports the MAC address of port 0",
+            reply: Result(
+                ok: "MacAddress",
+                err: ServerDeath,
+            ),
+        ),
+        "management_link_status": (
+            doc: "Checks the client side management network status",
+            reply: Result(
+                ok: "ManagementLinkStatus",
+                err: CLike("MgmtError")
+            ),
+            encoding: Ssmarshal,
+        ),
+        "management_counters": (
+            doc: "Returns management network counters",
+            reply: Result(
+                ok: "ManagementCounters",
+                err: CLike("MgmtError")
+            ),
+            encoding: Ssmarshal,
         ),
     },
 )

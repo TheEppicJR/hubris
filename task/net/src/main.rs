@@ -7,28 +7,33 @@
 
 mod bsp;
 mod buf;
+mod miim_bridge;
+mod server;
 
 pub mod pins;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "vlan")] {
-        mod vlan;
-        use vlan::{ServerImpl, ServerStorage};
+        mod server_vlan;
+        use server_vlan::ServerImpl;
     } else {
-        mod server;
-        use server::{ServerImpl, ServerStorage};
+        mod server_basic;
+        use server_basic::ServerImpl;
     }
 }
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "mgmt")] {
-        mod miim_bridge;
         pub(crate) mod mgmt;
     }
 }
 
 mod idl {
-    use task_net_api::{NetError, SocketName, UdpMetadata};
+    use task_net_api::{
+        KszError, KszMacTableEntry, LargePayloadBehavior, MacAddress,
+        ManagementCounters, ManagementLinkStatus, MgmtError, PhyError,
+        RecvError, SendError, SocketName, UdpMetadata,
+    };
     include!(concat!(env!("OUT_DIR"), "/server_stub.rs"));
 }
 
@@ -80,10 +85,13 @@ const TX_RING_SZ: usize = 4;
 const RX_RING_SZ: usize = 4;
 
 /// Notification mask for our IRQ; must match configuration in app.toml.
-const ETH_IRQ: u32 = 1;
+const ETH_IRQ: u32 = 1 << 0;
+
+/// Notification mask for MDIO timer; must match configuration in app.toml.
+const MDIO_TIMER_IRQ: u32 = 1 << 1;
 
 /// Notification mask for optional periodic logging
-const WAKE_IRQ: u32 = 2;
+const WAKE_IRQ: u32 = 1 << 2;
 
 /// Number of entries to maintain in our neighbor cache (ARP/NDP).
 const NEIGHBORS: usize = 4;
@@ -115,6 +123,11 @@ fn main() -> ! {
     sys.enter_reset(drv_stm32xx_sys_api::Peripheral::Eth1Mac);
     sys.leave_reset(drv_stm32xx_sys_api::Peripheral::Eth1Mac);
 
+    // Reset our MDIO timer.
+    sys.enable_clock(drv_stm32xx_sys_api::Peripheral::Tim16);
+    sys.enter_reset(drv_stm32xx_sys_api::Peripheral::Tim16);
+    sys.leave_reset(drv_stm32xx_sys_api::Peripheral::Tim16);
+
     // Do preliminary pin configuration
     bsp::configure_ethernet_pins(&sys);
 
@@ -131,6 +144,8 @@ fn main() -> ! {
         unsafe { &*device::ETHERNET_DMA::ptr() },
         tx_ring,
         rx_ring,
+        unsafe { &*device::TIM16::ptr() },
+        MDIO_TIMER_IRQ,
     );
 
     // Set up the network stack.
@@ -139,12 +154,11 @@ fn main() -> ! {
 
     // Configure the server and its local storage arrays (on the stack)
     let ipv6_addr = link_local_iface_addr(mac);
-    let mut storage = ServerStorage::new(eth);
 
     // Board-dependant initialization (e.g. bringing up the PHYs)
-    let bsp = bsp::Bsp::new(&storage.eth, &sys);
+    let bsp = bsp::Bsp::new(&eth, &sys);
 
-    let mut server = ServerImpl::new(&mut storage, ipv6_addr, mac, bsp);
+    let mut server = ServerImpl::new(&eth, ipv6_addr, mac, bsp);
 
     // Turn on our IRQ.
     userlib::sys_irq_control(ETH_IRQ, true);

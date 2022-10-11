@@ -48,6 +48,32 @@ impl SequencerFpga {
         }
     }
 
+    /// Reads the 32-bit checksum register, which should match
+    /// `GIMLET_BITSTREAM_CHECKSUM` if the image is loaded and hasn't changed.
+    pub fn read_checksum(&self) -> Result<u32, spi_api::SpiError> {
+        let mut checksum = 0;
+        self.read_bytes(Addr::CS0, checksum.as_bytes_mut())?;
+        Ok(checksum)
+    }
+
+    /// Writes the 32-bit checksum to match `GIMLET_BITSTREAM_CHECKSUM`.
+    ///
+    /// This should be done after the image is loaded, to record the image's
+    /// identity; if the Hubris image is power-cycled, this lets us detect
+    /// whether the FPGA should be reloaded.
+    pub fn write_checksum(&self) -> Result<(), spi_api::SpiError> {
+        self.write_bytes(Addr::CS0, GIMLET_BITSTREAM_CHECKSUM.as_bytes())
+    }
+
+    /// Check for a valid checksum, deliberately eating any SPI errors.
+    pub fn valid_checksum(&self) -> bool {
+        if let Ok(checksum) = self.read_checksum() {
+            checksum == GIMLET_BITSTREAM_CHECKSUM
+        } else {
+            false
+        }
+    }
+
     /// Performs the READ command against `addr`. This can read as many bytes as
     /// you like into `data_out`.
     pub fn read_bytes(
@@ -56,6 +82,17 @@ impl SequencerFpga {
         data_out: &mut [u8],
     ) -> Result<(), spi_api::SpiError> {
         self.raw_spi_read(Cmd::Read, addr.into(), data_out)
+    }
+
+    /// Performs a single-byte READ command against `addr` as a convenience
+    /// routine
+    pub fn read_byte(
+        &self,
+        addr: impl Into<u16>,
+    ) -> Result<u8, spi_api::SpiError> {
+        let mut buf = [0u8];
+        self.read_bytes(addr, &mut buf)?;
+        Ok(buf[0])
     }
 
     /// Performs the WRITE command against `addr`. This can write as many bytes
@@ -104,9 +141,7 @@ impl SequencerFpga {
         let header = CmdHeader { cmd, addr };
         let header = header.as_bytes();
 
-        for i in 0..header.len() {
-            data[i] = header[i];
-        }
+        data[..header.len()].copy_from_slice(header);
 
         self.spi.exchange(&data, &mut rval)?;
 
@@ -134,9 +169,7 @@ impl SequencerFpga {
         let header = CmdHeader { cmd, addr };
         let header = header.as_bytes();
 
-        for i in 0..header.len() {
-            data[i] = header[i];
-        }
+        data[..header.len()].copy_from_slice(header);
 
         for i in 0..data_in.len() {
             if i + header.len() < data.len() {

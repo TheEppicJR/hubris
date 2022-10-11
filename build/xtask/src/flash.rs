@@ -3,13 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use serde::Serialize;
-use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use anyhow::Context;
-
-use crate::Config;
 
 //
 // We allow for enough information to be put in the archive for the image to
@@ -31,7 +25,7 @@ pub enum FlashProgram {
 //
 #[derive(Debug, Serialize)]
 pub enum FlashProgramConfig {
-    Path(Vec<String>),
+    Path(PathBuf),
     Payload(String),
 }
 
@@ -58,20 +52,22 @@ pub enum FlashArgument {
 
 #[derive(Debug, Serialize)]
 pub struct FlashConfig {
+    chip: Option<String>,
     program: FlashProgram,
     args: Vec<FlashArgument>,
 }
 
 impl FlashProgramConfig {
-    fn new(path: Vec<&str>) -> Self {
-        FlashProgramConfig::Path(path.iter().map(|f| f.to_string()).collect())
+    fn new(path: PathBuf) -> Self {
+        FlashProgramConfig::Path(path)
     }
 }
 
 impl FlashConfig {
     fn new(program: FlashProgram) -> Self {
         FlashConfig {
-            program: program,
+            chip: None,
+            program,
             args: vec![],
         }
     }
@@ -85,9 +81,17 @@ impl FlashConfig {
     }
 
     //
+    // Set the chip
+    //
+    fn set_chip(&mut self, val: &str) -> &mut Self {
+        self.chip = Some(val.to_string());
+        self
+    }
+
+    //
     // Add the path to the payload as an argument to the flash program
     //
-    fn payload<'a>(&'a mut self) -> &'a mut Self {
+    fn payload(&mut self) -> &mut Self {
         self.args.push(FlashArgument::Payload);
         self
     }
@@ -112,7 +116,7 @@ impl FlashConfig {
     //
     // Add a flasher configuration file as an argument to the flash program
     //
-    fn config<'a>(&'a mut self) -> &'a mut Self {
+    fn config(&mut self) -> &mut Self {
         self.args.push(FlashArgument::Config);
         self
     }
@@ -122,23 +126,28 @@ impl FlashConfig {
     // our overall configuration
     //
     pub fn flatten(&mut self) -> anyhow::Result<()> {
-        if let FlashProgram::OpenOcd(ref config) = self.program {
-            if let FlashProgramConfig::Path(ref path) = config {
-                let p: PathBuf = path.iter().collect();
-                let text = std::fs::read_to_string(p)?;
-                self.program =
-                    FlashProgram::OpenOcd(FlashProgramConfig::Payload(text));
-            }
+        if let FlashProgram::OpenOcd(FlashProgramConfig::Path(path)) =
+            &self.program
+        {
+            let p: PathBuf = path.iter().collect();
+            let text = std::fs::read_to_string(p)?;
+            self.program =
+                FlashProgram::OpenOcd(FlashProgramConfig::Payload(text));
         }
 
         Ok(())
     }
 }
 
-pub fn config(board: &str) -> anyhow::Result<Option<FlashConfig>> {
-    match board {
-        "lpcxpresso55s69" | "gemini-bu-rot-1" | "gimlet-rot-1" => {
-            let chip = if board == "lpcxpresso55s69" {
+pub fn config(
+    board: &str,
+    chip_dir: &Path,
+) -> anyhow::Result<Option<FlashConfig>> {
+    let mut flash = match board {
+        "lpcxpresso55s69" | "rot-carrier-1" | "rot-carrier-2"
+        | "gimlet-rot-1" => {
+            let chip = if board == "lpcxpresso55s69" || board == "rot-carrier-2"
+            {
                 "lpc55s69"
             } else {
                 "lpc55s28"
@@ -160,31 +169,15 @@ pub fn config(board: &str) -> anyhow::Result<Option<FlashConfig>> {
                 .arg("hex")
                 .payload();
 
-            Ok(Some(flash))
+            flash
         }
+
         "stm32f3-discovery" | "stm32f4-discovery" | "nucleo-h743zi2"
         | "nucleo-h753zi" | "stm32h7b3i-dk" | "gemini-bu-1" | "gimletlet-1"
-        | "gimletlet-2" | "gimlet-a" | "gimlet-b" | "psc-1" | "sidecar-1"
-        | "stm32g031" | "stm32g070" | "stm32g0b1" => {
-            let (dir, file) = if board == "stm32f3-discovery" {
-                ("demo-stm32f4-discovery", "openocd-f3.cfg")
-            } else if board == "stm32f4-discovery" {
-                ("demo-stm32f4-discovery", "openocd.cfg")
-            } else if board == "stm32g031" {
-                ("demo-stm32g0-nucleo", "openocd.cfg")
-            } else if board == "stm32g070" {
-                ("demo-stm32g0-nucleo", "openocd.cfg")
-            } else if board == "stm32g0b1" {
-                ("demo-stm32g0-nucleo", "openocd.cfg")
-            } else if board == "gemini-bu-1" {
-                ("gemini-bu", "openocd.cfg")
-            } else if board == "gimletlet-2" {
-                ("gimletlet", "openocd.cfg")
-            } else {
-                ("demo-stm32h7-nucleo", "openocd.cfg")
-            };
-
-            let cfg = FlashProgramConfig::new(["app", dir, file].to_vec());
+        | "gimletlet-2" | "gimlet-a" | "gimlet-b" | "psc-a" | "sidecar-a"
+        | "stm32g031-nucleo" | "donglet-g030" | "donglet-g031"
+        | "stm32g070" | "stm32g0b1" => {
+            let cfg = FlashProgramConfig::new(chip_dir.join("openocd.cfg"));
 
             let mut flash = FlashConfig::new(FlashProgram::OpenOcd(cfg));
 
@@ -196,68 +189,37 @@ pub fn config(board: &str) -> anyhow::Result<Option<FlashConfig>> {
                 .arg("-c")
                 .arg("exit");
 
-            Ok(Some(flash))
+            flash
         }
         _ => {
             eprintln!("Warning: unrecognized board, won't know how to flash.");
-            Ok(None)
+            return Ok(None);
         }
-    }
+    };
+
+    flash.set_chip(chip_name(board)?);
+
+    Ok(Some(flash))
 }
 
-fn chip_name(board: &str) -> anyhow::Result<&'static str> {
+pub fn chip_name(board: &str) -> anyhow::Result<&'static str> {
     let b = match board {
-        "lpcxpresso55s69" => "LPC55S69JBD100",
-        "gemini-bu-rot-1" | "gimlet-rot-1" => "LPC55S69JBD100",
+        "lpcxpresso55s69" | "rot-carrier-2" => "LPC55S69JBD100",
+        "rot-carrier-1" | "gimlet-rot-1" => "LPC55S28JBD100",
         "stm32f3-discovery" => "STM32F303VCTx",
         "stm32f4-discovery" => "STM32F407VGTx",
         "nucleo-h743zi2" => "STM32H743ZITx",
         "nucleo-h753zi" => "STM32H753ZITx",
         "stm32h7b3i-dk" => "STM32H7B3IITx",
-        "gemini-bu-1" | "gimletlet-1" | "gimletlet-2" | "gimlet-a" | "gimlet-b" | "psc-1" | "sidecar-1" => "STM32H753ZITx",
-        "stm32g031" => "STM32G031Y8Yx",
-         "stm32g070" => "STM32G070KBTx",
-         "stm32g0b1" => anyhow::bail!("This board is not yet supported by probe-rs, please use OpenOCD directly"),
+        "gemini-bu-1" | "gimletlet-1" | "gimletlet-2" | "gimlet-a" | "gimlet-b" | "psc-a" | "sidecar-a" => "STM32H753ZITx",
+        "donglet-g030" => "STM32G030F6Px",
+        "donglet-g031" => "STM32G031F8Px",
+        "stm32g031-nucleo" => "STM32G031Y8Yx",
+        "stm32g070" => "STM32G070KBTx",
+        "stm32g0b1" => anyhow::bail!("This board is not yet supported by probe-rs, please use OpenOCD directly"),
         _ => anyhow::bail!("unrecognized board {}", board),
 
     };
 
     Ok(b)
-}
-
-pub fn run(verbose: bool, cfg: &Path) -> anyhow::Result<()> {
-    ctrlc::set_handler(|| {}).expect("Error setting Ctrl-C handler");
-
-    let toml = Config::from_file(&cfg)?;
-
-    let mut archive = PathBuf::from("target");
-    archive.push(&toml.name);
-    archive.push("dist");
-    archive.push(format!("build-{}.zip", &toml.name));
-
-    let humility_path = match env::var("HUBRIS_HUMILITY_PATH") {
-        Ok(path) => path,
-        _ => "humility".to_string(),
-    };
-
-    let mut humility = Command::new(humility_path);
-
-    humility.arg("-a").arg(archive);
-    humility.arg("-c").arg(chip_name(&toml.board)?);
-
-    if verbose {
-        humility.arg("-v");
-    }
-
-    humility.arg("flash").arg("--force");
-
-    let status = humility
-        .status()
-        .with_context(|| format!("failed to flash ({:?})", humility))?;
-
-    if !status.success() {
-        anyhow::bail!("flash command ({:?}) failed; see output", humility);
-    }
-
-    Ok(())
 }

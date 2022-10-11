@@ -9,7 +9,7 @@ use drv_i2c_api::*;
 use userlib::units::*;
 
 #[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Register {
     CpuTempInt = 0x01,
     Status = 0x02,
@@ -65,16 +65,13 @@ impl Sbtsi {
     fn read_reg(&self, reg: Register) -> Result<u8, Error> {
         match self.device.read_reg::<u8, u8>(reg as u8) {
             Ok(buf) => Ok(buf),
-            Err(code) => Err(Error::BadRegisterRead {
-                reg: reg,
-                code: code,
-            }),
+            Err(code) => Err(Error::BadRegisterRead { reg, code }),
         }
     }
 }
 
 impl TempSensor<Error> for Sbtsi {
-    fn read_temperature(&mut self) -> Result<Celsius, Error> {
+    fn read_temperature(&self) -> Result<Celsius, Error> {
         // Reading the integer portion latches the decimal portion; we need
         // to read it first, and then immediately read the decimal portion.
         let i = self.read_reg(Register::CpuTempInt)?;

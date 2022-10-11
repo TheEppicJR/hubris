@@ -6,9 +6,10 @@ use anyhow::Result;
 use proc_macro2::TokenStream;
 use quote::{format_ident, ToTokens, TokenStreamExt};
 use serde::Deserialize;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct Pin {
     port: usize,
     pin: usize,
@@ -35,7 +36,7 @@ impl ToTokens for Pin {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PinConfig {
     pin: Pin,
     alt: usize,
@@ -45,6 +46,7 @@ pub struct PinConfig {
     digimode: Option<String>,
     opendrain: Option<String>,
     direction: Option<String>,
+    name: Option<String>,
 }
 
 impl PinConfig {
@@ -119,6 +121,7 @@ pub fn codegen(pins: Vec<PinConfig>) -> Result<()> {
     let dest_path = std::path::Path::new(&out_dir).join("pin_config.rs");
     let mut file = std::fs::File::create(&dest_path)?;
 
+    let mut buf = BufWriter::new(Vec::new());
     writeln!(
         &mut file,
         "fn setup_pins(task : TaskId) -> Result<(), ()> {{"
@@ -142,10 +145,23 @@ pub fn codegen(pins: Vec<PinConfig>) -> Result<()> {
                 writeln!(&mut file, ").unwrap_lite();")?;
             }
         }
+        match p.name {
+            None => (),
+            Some(name) => {
+                let pin = p.pin.get_port_pin();
+                writeln!(&mut buf, "#[allow(unused)]")?;
+                writeln!(
+                    &mut buf,
+                    "const {}: Pin = Pin::PIO{}_{};",
+                    name, pin.0, pin.1
+                )?;
+            }
+        }
     }
 
     writeln!(&mut file, "Ok(())")?;
     writeln!(&mut file, "}}")?;
+    write!(file, "{}", String::from_utf8(buf.into_inner()?).unwrap())?;
 
     Ok(())
 }

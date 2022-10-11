@@ -9,7 +9,7 @@ use drv_i2c_api::*;
 use userlib::units::*;
 
 #[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Register {
     LocalTempHiByte = 0x00,
     RemoteTempHiByte = 0x01,
@@ -93,7 +93,7 @@ impl Validate<Error> for Tmp451 {
 }
 
 impl TempSensor<Error> for Tmp451 {
-    fn read_temperature(&mut self) -> Result<Celsius, Error> {
+    fn read_temperature(&self) -> Result<Celsius, Error> {
         let (hi, lo) = match self.target {
             Target::Local => {
                 (Register::LocalTempHiByte, Register::LocalTempLoByte)

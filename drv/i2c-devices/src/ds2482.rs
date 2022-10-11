@@ -10,7 +10,7 @@ use drv_onewire::Identifier;
 use ringbuf::*;
 
 #[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     OneWireTriplet = 0x78,
     OneWireSingleBit = 0x87,
@@ -52,7 +52,7 @@ bitfield! {
     direction, set_direction: 7;
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Register {
     Status = 0xf0,
     ReadData = 0xe1,
@@ -100,7 +100,7 @@ fn read_register(device: &I2cDevice, register: Register) -> Result<u8, Error> {
             ringbuf_entry!(Trace::ReadError(register, code));
             Err(Error::BadRegisterRead {
                 reg: register,
-                code: code,
+                code,
             })
         }
     }
@@ -123,10 +123,7 @@ fn send_command(
         }
         Err(code) => {
             ringbuf_entry!(Trace::CommandError(cmd, code));
-            Err(Error::BadCommand {
-                cmd: cmd,
-                code: code,
-            })
+            Err(Error::BadCommand { cmd, code })
         }
     }
 }

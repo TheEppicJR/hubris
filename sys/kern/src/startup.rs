@@ -4,9 +4,21 @@
 
 //! Kernel startup.
 
-use crate::app;
-use crate::task::{self, Task};
+use crate::atomic::AtomicExt;
+use crate::task::Task;
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Tracks when a mutable reference to the task table is floating around in
+/// kernel code, to prevent production of a second one. This forms a sort of
+/// ad-hoc Mutex around the task table.
+///
+/// Notice that this begins life initialized to `true`. This prevents use of
+/// `with_task_table` et al before the kernel is properly started. We set it to
+/// `false` late in `start_kernel`.
+static TASK_TABLE_IN_USE: AtomicBool = AtomicBool::new(true);
+
+pub const HUBRIS_FAULT_NOTIFICATION: u32 = 1;
 
 /// The main kernel entry point.
 ///
@@ -21,95 +33,29 @@ use core::mem::MaybeUninit;
 ///
 /// # Safety
 ///
-/// This can be called exactly once per boot.
+/// This function has architecture-specific requirements for safe use -- on ARM,
+/// for instance, it must be called from the main (interrupt) stack in
+/// privileged mode.
+///
+/// This function may not be called reentrantly or from multiple cores.
 pub unsafe fn start_kernel(tick_divisor: u32) -> ! {
-    klog!("starting: laziness");
-
     // Set our clock frequency so debuggers can find it as needed
-    crate::arch::set_clock_freq(tick_divisor);
-
-    let regions = &HUBRIS_REGION_DESCS;
-    let tasks = &HUBRIS_TASK_DESCS;
-
-    // Validate regions first, since tasks will use them.
-    for region in regions {
-        // Check for use of reserved attributes.
-        uassert!(!region
-            .attributes
-            .intersects(app::RegionAttributes::RESERVED));
-        // Check for base+size overflow
-        uassert!(region.base.checked_add(region.size).is_some());
-        // Check for suspicious use of reserved word
-        uassert_eq!(region.reserved_zero, 0);
-
-        #[cfg(any(armv6m, armv7m))]
-        uassert!(region.size.is_power_of_two());
+    //
+    // Safety: TODO it is not clear that this operation needs to be unsafe.
+    unsafe {
+        crate::arch::set_clock_freq(tick_divisor);
     }
 
-    // Validate tasks next.
-    for task in tasks {
-        uassert!(!task.flags.intersects(app::TaskFlags::RESERVED));
+    // Grab references to all our statics.
+    let task_descs = &HUBRIS_TASK_DESCS;
+    let region_descs = &HUBRIS_REGION_DESCS;
+    // Safety: these references will remain unique so long as the "only called
+    // once per boot" contract on this function is upheld.
+    let (task_table, region_tables) = unsafe {
+        (&mut HUBRIS_TASK_TABLE_SPACE, &mut HUBRIS_REGION_TABLE_SPACE)
+    };
 
-        let mut entry_pt_found = false;
-        let mut stack_ptr_found = false;
-        for &region_idx in &task.regions {
-            let region = &regions[region_idx as usize];
-            if task.entry_point.wrapping_sub(region.base) < region.size {
-                if region.attributes.contains(app::RegionAttributes::EXECUTE) {
-                    entry_pt_found = true;
-                }
-            }
-            // Note that stack pointer is compared using <=, because it's okay
-            // to have it point just off the end as the stack is initially
-            // empty.
-            if task.initial_stack.wrapping_sub(region.base) <= region.size {
-                if region.attributes.contains(
-                    app::RegionAttributes::READ | app::RegionAttributes::WRITE,
-                ) {
-                    stack_ptr_found = true;
-                }
-            }
-        }
-
-        uassert!(entry_pt_found);
-        uassert!(stack_ptr_found);
-    }
-
-    // Finally, check interrupts.
-    for (irq, owner) in HUBRIS_IRQ_TASK_LOOKUP.values {
-        if irq.0 != u32::MAX {
-            uassert!(owner.task < tasks.len() as u32);
-        }
-    }
-    for (owner, irqs) in HUBRIS_TASK_IRQ_LOOKUP.values {
-        if !irqs.is_empty() {
-            uassert!(owner.task < tasks.len() as u32);
-        }
-    }
-
-    // Okay, we're pretty sure this is all legitimate. Grab the TCB RAM and
-    // start the safe code.
-    safe_start_kernel(
-        tasks,
-        regions,
-        &mut HUBRIS_TASK_TABLE_SPACE,
-        &mut HUBRIS_REGION_TABLE_SPACE,
-        tick_divisor,
-    )
-}
-
-fn safe_start_kernel(
-    task_descs: &'static [app::TaskDesc],
-    region_descs: &'static [app::RegionDesc],
-    task_table: &'static mut MaybeUninit<[Task; HUBRIS_TASK_COUNT]>,
-    region_tables: &'static mut MaybeUninit<
-        [[&'static app::RegionDesc; app::REGIONS_PER_TASK]; HUBRIS_TASK_COUNT],
-    >,
-    tick_divisor: u32,
-) -> ! {
-    klog!("starting: impatience");
-
-    // Allocate our RAM data structures.
+    // Initialize our RAM data structures.
 
     // We currently just refer to the RegionDescs in Flash. No additional
     // preparation of those structures is required here. This will almost
@@ -123,7 +69,7 @@ fn safe_start_kernel(
     // these.
 
     // Safety: MaybeUninit<[T]> -> [MaybeUninit<T>] is defined as safe.
-    let region_tables: &mut [[MaybeUninit<&'static app::RegionDesc>; app::REGIONS_PER_TASK];
+    let region_tables: &mut [[MaybeUninit<&'static abi::RegionDesc>; abi::REGIONS_PER_TASK];
              HUBRIS_TASK_COUNT] =
         unsafe { &mut *(region_tables as *mut _ as *mut _) };
 
@@ -135,7 +81,7 @@ fn safe_start_kernel(
 
     // Safety: we have fully initialized this and can shed the uninit part.
     // We're also dropping &mut.
-    let region_tables: &[[&'static app::RegionDesc; app::REGIONS_PER_TASK];
+    let region_tables: &[[&'static abi::RegionDesc; abi::REGIONS_PER_TASK];
          HUBRIS_TASK_COUNT] = unsafe { &*(region_tables as *mut _ as *mut _) };
 
     // Now, generate the task table.
@@ -158,30 +104,45 @@ fn safe_start_kernel(
         crate::arch::reinitialize(task);
     }
 
-    // Stash the table extents somewhere that we can get it later, cheaply,
-    // without recomputing stuff. This is treated as architecture specific
-    // largely as a nod to simulators that might want to use a thread local
-    // rather than a global static, but some future pleasant architecture might
-    // let us store this in secret registers...
-    //
-    // Safety: as long as we don't call `with_task_table` or `with_irq_table`
-    // after this point before switching to user, we can't alias, and we'll be
-    // okay.
-    unsafe {
-        // TODO: these could be done by the linker...
-        crate::arch::set_task_table(task_table);
-    }
-    // TODO: this could be constant-folded now.
-    task::set_fault_notification(HUBRIS_FAULT_NOTIFICATION);
-
     // Great! Pick our first task. We'll act like we're scheduling after the
     // last task, which will cause a scan from 0 on.
     let first_task_index =
         crate::task::select(task_table.len() - 1, task_table);
 
     crate::arch::apply_memory_protection(&task_table[first_task_index]);
-    klog!("starting: hubris");
-    crate::arch::start_first_task(tick_divisor, &task_table[first_task_index])
+    TASK_TABLE_IN_USE.store(false, Ordering::Release);
+    crate::arch::start_first_task(
+        tick_divisor,
+        &mut task_table[first_task_index],
+    )
+}
+
+/// Runs `body` with a reference to the task table.
+///
+/// To preserve uniqueness of the `&mut` reference passed into `body`, this
+/// function will detect any attempts to call it recursively and panic.
+pub(crate) fn with_task_table<R>(body: impl FnOnce(&mut [Task]) -> R) -> R {
+    if TASK_TABLE_IN_USE.swap_polyfill(true, Ordering::Acquire) {
+        panic!(); // recursive use of with_task_table
+    }
+    // Safety: we have observed `TASK_TABLE_IN_USE` being false, which means the
+    // task table is initialized (note that at reset it starts out true) and
+    // that we're not already within a call to with_task_table. Thus, we can
+    // produce a reference to the task table without aliasing, and we can be
+    // confident that the memory it's pointing to is initialized and shed the
+    // MaybeUninit.
+    let task_table = unsafe {
+        &mut *(&mut HUBRIS_TASK_TABLE_SPACE
+            as *mut MaybeUninit<[Task; HUBRIS_TASK_COUNT]>
+            as *mut [MaybeUninit<Task>; HUBRIS_TASK_COUNT]
+            as *mut [Task; HUBRIS_TASK_COUNT])
+    };
+
+    let r = body(task_table);
+
+    TASK_TABLE_IN_USE.store(false, Ordering::Release);
+
+    r
 }
 
 include!(concat!(env!("OUT_DIR"), "/kconfig.rs"));

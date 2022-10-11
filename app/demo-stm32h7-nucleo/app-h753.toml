@@ -1,11 +1,10 @@
 name = "demo-stm32h753-nucleo"
 target = "thumbv7em-none-eabihf"
 board = "nucleo-h753zi"
-chip = "../../chips/stm32h7.toml"
+chip = "../../chips/stm32h7"
 stacksize = 896
 
 [kernel]
-path = "."
 name = "demo-stm32h7-nucleo"
 requires = {flash = 22000, ram = 5120}
 #
@@ -20,57 +19,32 @@ requires = {flash = 22000, ram = 5120}
 #
 features = ["h753", "itm"]
 
-[supervisor]
-notification = 1
-
-# Flash sections are mapped into flash bank 1 (of 2).
-[outputs.flash]
-address = 0x08000000
-size = 1048576
-read = true
-execute = true
-
-# RAM sections are currently mapped into DTCM, a small but fast SRAM.
-[outputs.ram]
-address = 0x20000000
-size = 131072
-read = true
-write = true
-execute = false  # let's assume XN until proven otherwise
-
-# Network buffers are placed in sram1, which is directly accessible by the
-# Ethernet MAC.
-[outputs.sram1]
-address = 0x30000000
-size = 0x20000
-read = true
-write = true
-dma = true
-
 [tasks.jefe]
-path = "../../task/jefe"
 name = "task-jefe"
 priority = 0
-requires = {flash = 8192, ram = 2048}
+max-sizes = {flash = 8192, ram = 2048}
 start = true
 features = ["itm"]
 stacksize = 1536
 
+[tasks.jefe.config.allowed-callers]
+set_reset_reason = ["sys"]
+request_reset = ["hiffy"]
+
 [tasks.sys]
-path = "../../drv/stm32xx-sys"
 name = "drv-stm32xx-sys"
 features = ["h753"]
 priority = 1
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 uses = ["rcc", "gpios1", "gpios2", "gpios3"]
 start = true
+task-slots = ["jefe"]
 
 [tasks.i2c_driver]
-path = "../../drv/stm32h7-i2c-server"
-name = "drv-stm32h7-i2c-server"
+name = "drv-stm32xx-i2c-server"
 features = ["h753"]
 priority = 2
-requires = {flash = 16384, ram = 2048}
+max-sizes = {flash = 16384, ram = 2048}
 uses = ["i2c1", "i2c2", "i2c3", "i2c4"]
 start = true
 task-slots = ["sys"]
@@ -80,10 +54,9 @@ task-slots = ["sys"]
 "i2c2.error" = 0b0000_0010
 
 [tasks.spi_driver]
-path = "../../drv/stm32h7-spi-server"
 name = "drv-stm32h7-spi-server"
 priority = 2
-requires = {flash = 16384, ram = 2048}
+max-sizes = {flash = 16384, ram = 2048}
 features = ["spi1", "h753"]
 uses = ["spi1"]
 start = true
@@ -95,69 +68,78 @@ task-slots = ["sys"]
 global_config = "spi1"
 
 [tasks.net]
-path = "../../task/net"
 name = "task-net"
-stacksize = 3800
+stacksize = 3000
 priority = 2
-requires = {flash = 131072, ram = 8192, sram1 = 32768}
+max-sizes = {flash = 131072, ram = 16384, sram1 = 32768}
 features = ["h753"]
 sections = {eth_bulk = "sram1"}
-uses = ["eth", "eth_dma", "system_flash"]
+uses = ["eth", "eth_dma", "system_flash", "tim16"]
 start = true
-interrupts = {"eth.irq" = 0b1}
+interrupts = {"eth.irq" = 0b1, "tim16.irq" = 0b10}
 task-slots = ["sys"]
 
 [tasks.user_leds]
-path = "../../drv/user-leds"
 name = "drv-user-leds"
 features = ["stm32h7"]
 priority = 2
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 start = true
 task-slots = ["sys"]
 
 [tasks.ping]
-path = "../../task/ping"
 name = "task-ping"
 features = []
-priority = 4
-requires = {flash = 8192, ram = 1024}
+priority = 5
+max-sizes = {flash = 8192, ram = 1024}
 start = true
 task-slots = [{peer = "pong"}]
 
 [tasks.pong]
-path = "../../task/pong"
 name = "task-pong"
 priority = 3
-requires = {flash = 1024, ram = 1024}
+max-sizes = {flash = 1024, ram = 1024}
 start = true
 task-slots = ["user_leds"]
 
 [tasks.udpecho]
-path = "../../task/udpecho"
 name = "task-udpecho"
 priority = 3
-requires = {flash = 32768, ram = 8192}
+max-sizes = {flash = 32768, ram = 8192}
+stacksize = 4096
+start = true
+task-slots = ["net"]
+
+[tasks.udpbroadcast]
+name = "task-udpbroadcast"
+priority = 3
+max-sizes = {flash = 16384, ram = 8192}
+stacksize = 4096
+start = true
+task-slots = ["net"]
+
+[tasks.udprpc]
+name = "task-udprpc"
+priority = 3
+max-sizes = {flash = 32768, ram = 8192}
 stacksize = 4096
 start = true
 task-slots = ["net"]
 
 [tasks.hiffy]
-path = "../../task/hiffy"
 name = "task-hiffy"
 features = ["h753", "stm32h7", "itm", "i2c", "gpio", "spi", "qspi", "hash"]
-priority = 3
-requires = {flash = 32768, ram = 32768 }
+priority = 5
+max-sizes = {flash = 32768, ram = 32768 }
 stacksize = 2048
 start = true
 task-slots = ["sys", "i2c_driver", "hf", "hash_driver"]
 
 [tasks.hf]
-path = "../../drv/gimlet-hf-server"
 name = "drv-gimlet-hf-server"
 features = ["h753", "hash"]
-priority = 3
-requires = {flash = 16384, ram = 4096 }
+priority = 4
+max-sizes = {flash = 16384, ram = 4096 }
 stacksize = 2048
 start = true
 uses = ["quadspi"]
@@ -165,11 +147,10 @@ interrupts = {"quadspi.irq" = 1}
 task-slots = ["sys", "hash_driver"]
 
 [tasks.hash_driver]
-path = "../../drv/stm32h7-hash-server"
 name = "drv-stm32h7-hash-server"
 features = ["h753"]
 priority = 3
-requires = {flash = 8192, ram=4096 }
+max-sizes = {flash = 16384, ram=4096 }
 stacksize = 2048
 start = true
 uses = ["hash"]
@@ -177,19 +158,17 @@ interrupts = {"hash.irq" = 1}
 task-slots = ["sys"]
 
 [tasks.idle]
-path = "../../task/idle"
 name = "task-idle"
-priority = 5
-requires = {flash = 128, ram = 256}
+priority = 7
+max-sizes = {flash = 128, ram = 256}
 stacksize = 256
 start = true
 
 [tasks.rng_driver]
 features = ["h753"]
-path = "../../drv/stm32h7-rng"
-priority = 2
+priority = 3
 name = "drv-stm32h7-rng"
-requires = {flash = 8192, ram = 512}
+max-sizes = {flash = 8192, ram = 512}
 stacksize = 256
 start = true
 task-slots = ["sys", "user_leds"]
@@ -232,5 +211,19 @@ clock_divider = "DIV32"
 kind = "udp"
 owner = {name = "udpecho", notification = 1}
 port = 7
+tx = { packets = 3, bytes = 1024 }
+rx = { packets = 3, bytes = 1024 }
+
+[config.net.sockets.broadcast]
+kind = "udp"
+owner = {name = "udpbroadcast", notification = 1}
+port = 997
+tx = { packets = 3, bytes = 1024 }
+rx = { packets = 3, bytes = 1024 }
+
+[config.net.sockets.rpc]
+kind = "udp"
+owner = {name = "udprpc", notification = 1}
+port = 998
 tx = { packets = 3, bytes = 1024 }
 rx = { packets = 3, bytes = 1024 }

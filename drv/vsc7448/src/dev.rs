@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::{
+    config::Speed,
     port::{port10g_flush, port1g_flush},
     Vsc7448Rw, VscError,
 };
@@ -14,12 +15,6 @@ use vsc7448_pac::*;
 pub enum DevGeneric {
     Dev1g(u8),
     Dev2g5(u8),
-}
-
-#[derive(Copy, Clone)]
-pub enum Speed {
-    Speed100M,
-    Speed1G,
 }
 
 impl DevGeneric {
@@ -46,28 +41,21 @@ impl DevGeneric {
     /// chip is configured.
     pub fn port(&self) -> u8 {
         match *self {
-            DevGeneric::Dev1g(d) => {
-                if d < 8 {
-                    d
-                } else {
-                    // DEV1G_8-23 are only available in QSGMII mode, where
-                    // they map to ports 32-47 (Table 8)
-                    d + 24
-                }
-            }
-            DevGeneric::Dev2g5(d) => {
-                if d < 24 {
-                    d + 8
-                } else if d == 24 {
-                    // DEV2G5_24 is the NPI port, configured through SERDES1G_0
-                    48
-                } else {
-                    // DEV2G5_25-28 are only available when running through
-                    // a SERDES10G in SGMII 1G/2.5G mode.  They map to ports
-                    // 49-52, using SERDES10G_0-3 (Table 9)
-                    d + 24
-                }
-            }
+            DevGeneric::Dev1g(d) => match d {
+                0..=7 => d,
+                // DEV1G_8-23 are only available in QSGMII mode, where
+                // they map to ports 32-47 (Table 8)
+                d => d + 24,
+            },
+            DevGeneric::Dev2g5(d) => match d {
+                0..=23 => d + 8,
+                // DEV2G5_24 is the NPI port, configured through SERDES1G_0
+                24 => 48,
+                // DEV2G5_25-28 are only available when running through
+                // a SERDES10G in SGMII 1G/2.5G mode.  They map to ports
+                // 49-52, using SERDES10G_0-3 (Table 9)
+                d => d + 24,
+            },
         }
     }
     /// Returns the register block for this device.  This is always a DEV1G
@@ -108,6 +96,7 @@ impl DevGeneric {
             r.set_giga_mode_ena(match speed {
                 Speed::Speed1G => 1,
                 Speed::Speed100M => 0,
+                Speed::Speed10G => panic!("Invalid speed for SGMII"),
             });
         })?;
 
@@ -126,6 +115,7 @@ impl DevGeneric {
                     r.set_rx_ifg1(1);
                     r.set_rx_ifg2(4);
                 }
+                Speed::Speed10G => unreachable!(), // checked above
             }
         })?;
 
@@ -164,6 +154,7 @@ impl DevGeneric {
                 // instead, but the SDK always uses 0
                 Speed::Speed1G => 0,
                 Speed::Speed100M => 1,
+                Speed::Speed10G => unreachable!(), // checked above
             })
         })?;
 
@@ -186,6 +177,7 @@ impl DevGeneric {
             r.set_speed_sel(match speed {
                 Speed::Speed1G => 2,
                 Speed::Speed100M => 1,
+                Speed::Speed10G => unreachable!(), // checked above
             });
         })?;
 
@@ -251,6 +243,102 @@ impl Dev10g {
             r.set_fwd_urgency(9);
         })?;
 
+        Ok(())
+    }
+    pub fn init_10gbase_kr(&self, v: &impl Vsc7448Rw) -> Result<(), VscError> {
+        // Based on `jr2_port_kr_conf_set` in the SDK
+        let dev7 = XGKR1(self.index()); // ANEG
+        let dev1 = XGKR0(self.index()); // Training
+        let xfi = XGXFI(self.index()); // KR-Control/Stickies
+
+        // "Adjust the timers for JR2 core clock (frequency of 250Mhz)
+        v.write(dev7.LFLONG_TMR().LFLONG_MSW(), 322.into())?;
+        v.write(dev7.TR_TMR().TR_MSW(), 322.into())?;
+        v.modify(dev1.TR_CFG0().TR_CFG0(), |r| r.set_tmr_dvdr(6))?;
+        v.write(dev1.WT_TMR().WT_TMR(), 1712.into())?;
+        v.write(dev1.MW_TMR().MW_TMR_LSW(), 58521.into())?;
+        v.write(dev1.MW_TMR().MW_TMR_MSW(), 204.into())?;
+
+        // "Clear the KR_CONTROL stickies"
+        v.write(xfi.XFI_CONTROL().KR_CONTROL(), 0x7FF.into())?;
+
+        // "AN Selector"
+        v.write(dev7.LD_ADV().KR_7X0010(), 0x0001.into())?;
+        v.modify(dev7.LD_ADV().KR_7X0011(), |r| {
+            r.set_adv1(1 << 7); // 10GBase-KR
+        })?;
+        v.modify(dev7.LD_ADV().KR_7X0012(), |r| {
+            r.set_adv2(1 << 14); // FEC ANEG, but not requested (?)
+        })?;
+        v.modify(dev1.TR_CFG1().TR_CFG1(), |r| {
+            r.set_tmr_hold(r.tmr_hold() | (1 << 10));
+        })?;
+
+        v.modify(dev7.AN_CFG0().AN_CFG0(), |r| {
+            r.set_tr_disable(0);
+        })?;
+
+        // For now, let's assume we're doing training
+        // "Clear training history" (1555)
+        v.modify(dev1.TR_CFG0().TR_CFG0(), |r| {
+            r.set_sm_hist_clr(0);
+        })?;
+
+        // "KR Training config according to UG1061 chapter 3.1" 1563
+        v.modify(dev1.TR_MTHD().TR_MTHD(), |r| {
+            r.set_mthd_cp(0);
+            r.set_mthd_c0(0);
+            r.set_mthd_cm(0);
+        })?;
+        v.modify(dev1.TR_CFG0().TR_CFG0(), |r| {
+            r.set_ld_pre_init(1);
+            r.set_lp_pre_init(1);
+        })?;
+        v.modify(dev1.TR_CFG2().TR_CFG2(), |r| {
+            r.set_vp_max(0x1f);
+            r.set_v2_min(1);
+        })?;
+        v.modify(dev1.TR_CFG3().TR_CFG3(), |r| {
+            r.set_cp_max(0x3f);
+            r.set_cp_min(0x35);
+        })?;
+        v.modify(dev1.TR_CFG4().TR_CFG4(), |r| {
+            r.set_c0_max(0x1f);
+            r.set_c0_min(0xc);
+        })?;
+        v.modify(dev1.TR_CFG5().TR_CFG5(), |r| {
+            r.set_cm_max(0);
+            r.set_cm_min(0x3a);
+        })?;
+        v.modify(dev1.TR_CFG6().TR_CFG6(), |r| {
+            r.set_cp_init(0x38);
+            r.set_c0_init(0x14);
+        })?;
+        v.modify(dev1.TR_CFG7().TR_CFG7(), |r| {
+            r.set_cm_init(0x3e);
+        })?;
+        v.modify(dev1.OBCFG_ADDR().OBCFG_ADDR(), |r| {
+            r.set_obcfg_addr(0x12);
+        })?;
+
+        // "KR Autoneg" (line 1626)
+        // For now, operate under the assumption that we *are* doing aneg
+
+        // "Disable clock gating"
+        v.modify(dev7.AN_CFG0().AN_CFG0(), |r| r.set_clkg_disable(0))?;
+        // "Clear aneg history"
+        v.modify(dev7.AN_CFG0().AN_CFG0(), |r| r.set_an_sm_hist_clr(1))?;
+        v.modify(dev7.AN_CFG0().AN_CFG0(), |r| r.set_an_sm_hist_clr(0))?;
+        // "Disable / Enable Auto-neg"
+        v.modify(dev7.KR_7X0000().KR_7X0000(), |r| r.set_an_enable(0))?;
+        v.modify(dev7.KR_7X0000().KR_7X0000(), |r| r.set_an_enable(1))?;
+
+        // "Release the break link timer"
+        v.modify(dev1.TR_CFG1().TR_CFG1(), |r| {
+            let mut tmr_hold = r.tmr_hold();
+            tmr_hold &= !(1 << 10);
+            r.set_tmr_hold(tmr_hold);
+        })?;
         Ok(())
     }
 }

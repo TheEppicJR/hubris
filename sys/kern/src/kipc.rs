@@ -4,11 +4,13 @@
 
 //! Implementation of IPC operations on the virtual kernel task.
 
-use abi::{FaultInfo, SchedState, TaskState, UsageError};
+use abi::{FaultInfo, Kipcnum, SchedState, TaskState, UsageError};
 
+use crate::arch;
 use crate::err::UserError;
 use crate::task::{current_id, ArchState, NextTask, Task};
 use crate::umem::USlice;
+use core::convert::TryFrom;
 
 /// Message dispatcher.
 pub fn handle_kernel_message(
@@ -17,24 +19,27 @@ pub fn handle_kernel_message(
 ) -> Result<NextTask, UserError> {
     // Copy out arguments.
     let args = tasks[caller].save().as_send_args();
-    let operation = args.operation();
-    // We're not checking these yet as we might not need them.
-    let maybe_message = args.message();
-    let maybe_response = args.response_buffer();
-    drop(args);
 
-    match operation {
-        1 => read_task_status(tasks, caller, maybe_message?, maybe_response?),
-        2 => restart_task(tasks, caller, maybe_message?),
-        3 => fault_task(tasks, caller, maybe_message?),
-        4 => read_image_id(tasks, caller, maybe_response?),
+    match Kipcnum::try_from(args.operation) {
+        Ok(Kipcnum::ReadTaskStatus) => {
+            read_task_status(tasks, caller, args.message?, args.response?)
+        }
+        Ok(Kipcnum::RestartTask) => restart_task(tasks, caller, args.message?),
+        Ok(Kipcnum::FaultTask) => fault_task(tasks, caller, args.message?),
+        Ok(Kipcnum::ReadImageId) => {
+            read_image_id(tasks, caller, args.response?)
+        }
+        Ok(Kipcnum::Reset) => reset(tasks, caller, args.message?),
         _ => {
             // Task has sent an unknown message to the kernel. That's bad.
-            return Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
+            Err(UserError::Unrecoverable(FaultInfo::SyscallUsage(
                 UsageError::BadKernelMessage,
-            )));
+            )))
         }
     }
+}
+fn reset(_tasks: &mut [Task], _caller: usize, _message: USlice<u8>) -> ! {
+    arch::reset()
 }
 
 fn deserialize_message<T>(

@@ -1,11 +1,11 @@
 name = "gimlet-b"
 target = "thumbv7em-none-eabihf"
 board = "gimlet-b"
-chip = "../../chips/stm32h7.toml"
+chip = "../../chips/stm32h7"
+memory = "memory-large.toml"
 stacksize = 896
 
 [kernel]
-path = "."
 name = "gimlet"
 requires = {flash = 32768, ram = 8192}
 #
@@ -20,69 +20,48 @@ requires = {flash = 32768, ram = 8192}
 #
 features = ["itm"]
 
-[supervisor]
-notification = 1
-
-# Flash sections are mapped into flash bank 1 (of 2).
-[outputs.flash]
-address = 0x08000000
-size = 1048576
-read = true
-execute = true
-
-# RAM sections are currently mapped into DTCM, a small but fast SRAM.
-[outputs.ram]
-address = 0x20000000
-size = 131072
-read = true
-write = true
-execute = false  # let's assume XN until proven otherwise
-
-# Network buffers are placed in sram1, which is directly accessible by the
-# Ethernet MAC.
-[outputs.sram1]
-address = 0x30000000
-size = 0x20000
-read = true
-write = true
-dma = true
-
 [tasks.jefe]
-path = "../../task/jefe"
 name = "task-jefe"
 priority = 0
-requires = {flash = 8192, ram = 2048}
+max-sizes = {flash = 8192, ram = 2048}
 start = true
 features = ["itm"]
 stacksize = 1536
 
+[tasks.jefe.config.on-state-change]
+net = {bit-number = 3}
+host_sp_comms = {bit-number = 1}
+
+[tasks.jefe.config.allowed-callers]
+set_state = ["gimlet_seq"]
+set_reset_reason = ["sys"]
+request_reset = ["hiffy", "mgmt_gateway"]
+
 [tasks.net]
-path = "../../task/net"
 name = "task-net"
-stacksize = 5400
-priority = 2
-features = ["mgmt", "h753", "gimlet", "h7-vlan"]
-requires = {flash = 131072, ram = 16384, sram1 = 16384}
+stacksize = 4640
+priority = 5
+features = ["mgmt", "h753", "gimlet", "vlan"]
+max-sizes = {flash = 131072, ram = 32768, sram1 = 16384}
 sections = {eth_bulk = "sram1"}
-uses = ["eth", "eth_dma", "system_flash"]
+uses = ["eth", "eth_dma", "system_flash", "tim16"]
 start = true
-interrupts = {"eth.irq" = 0b1}
-task-slots = ["sys", { spi_driver = "spi2_driver" }, { seq = "gimlet_seq" }]
+interrupts = {"eth.irq" = 0b1, "tim16.irq" = 0b10}
+task-slots = ["sys", { spi_driver = "spi2_driver" }, "jefe"]
 
 [tasks.sys]
-path = "../../drv/stm32xx-sys"
 name = "drv-stm32xx-sys"
 features = ["h753"]
 priority = 1
-requires = {flash = 2048, ram = 1024}
+max-sizes = {flash = 2048, ram = 1024}
 uses = ["rcc", "gpios1", "gpios2", "gpios3"]
 start = true
+task-slots = ["jefe"]
 
 [tasks.spi4_driver]
-path = "../../drv/stm32h7-spi-server"
 name = "drv-stm32h7-spi-server"
-priority = 2
-requires = {flash = 16384, ram = 2048}
+priority = 3
+max-sizes = {flash = 16384, ram = 2048}
 features = ["spi4", "h753"]
 uses = ["spi4"]
 start = true
@@ -94,10 +73,9 @@ task-slots = ["sys"]
 global_config = "spi4"
 
 [tasks.spi2_driver]
-path = "../../drv/stm32h7-spi-server"
 name = "drv-stm32h7-spi-server"
-priority = 2
-requires = {flash = 16384, ram = 2048}
+priority = 3
+max-sizes = {flash = 16384, ram = 2048}
 features = ["spi2", "h753"]
 uses = ["spi2"]
 start = true
@@ -109,11 +87,10 @@ task-slots = ["sys"]
 global_config = "spi2"
 
 [tasks.i2c_driver]
-path = "../../drv/stm32h7-i2c-server"
-name = "drv-stm32h7-i2c-server"
+name = "drv-stm32xx-i2c-server"
 features = ["h753", "itm"]
-priority = 2
-requires = {flash = 16384, ram = 2048}
+priority = 3
+max-sizes = {flash = 16384, ram = 2048}
 uses = ["i2c2", "i2c3", "i2c4"]
 start = true
 task-slots = ["sys"]
@@ -127,11 +104,10 @@ task-slots = ["sys"]
 "i2c4.error" = 0b0000_1000
 
 [tasks.spd]
-path = "../../task/spd"
 name = "task-spd"
 features = ["h753", "itm"]
 priority = 2
-requires = {flash = 16384, ram = 16384}
+max-sizes = {flash = 16384, ram = 16384}
 uses = ["i2c1"]
 start = true
 task-slots = ["sys", "i2c_driver"]
@@ -141,104 +117,156 @@ task-slots = ["sys", "i2c_driver"]
 "i2c1.error" = 0b0000_0001
 
 [tasks.thermal]
-path = "../../task/thermal"
 name = "task-thermal"
-features = ["itm", "h753"]
-priority = 3
-requires = {flash = 16384, ram = 4096 }
-stacksize = 3504
+features = ["itm", "gimlet"]
+priority = 5
+max-sizes = {flash = 32768, ram = 8192 }
+stacksize = 4504
 start = true
-task-slots = ["i2c_driver", "sensor"]
+task-slots = ["i2c_driver", "sensor", "gimlet_seq", "jefe"]
 
 [tasks.power]
-path = "../../task/power"
 name = "task-power"
-features = ["itm", "h753"]
-priority = 3
-requires = {flash = 16384, ram = 4096 }
+features = ["itm", "gimlet"]
+priority = 6
+max-sizes = {flash = 16384, ram = 4096 }
 stacksize = 2048
 start = true
 task-slots = ["i2c_driver", "sensor", "gimlet_seq"]
 
 [tasks.hiffy]
-path = "../../task/hiffy"
 name = "task-hiffy"
-features = ["h753", "stm32h7", "itm", "i2c", "gpio", "spi", "qspi"]
-priority = 3
-requires = {flash = 32768, ram = 32768 }
+features = ["h753", "stm32h7", "itm", "i2c", "gpio", "spi", "qspi", "hash"]
+priority = 5
+max-sizes = {flash = 32768, ram = 32768 }
 stacksize = 1024
 start = true
-task-slots = ["sys", "hf", "i2c_driver"]
+task-slots = ["sys", "hf", "i2c_driver", "hash_driver"]
 
 [tasks.gimlet_seq]
-path = "../../drv/gimlet-seq-server"
 name = "drv-gimlet-seq-server"
 features = ["h753"]
-priority = 3
-requires = {flash = 65536, ram = 4096 }
+priority = 4
+max-sizes = {flash = 65536, ram = 4096 }
 stacksize = 1600
 start = true
-task-slots = ["sys", "i2c_driver", {spi_driver = "spi2_driver"}, "hf"]
+task-slots = ["sys", "i2c_driver", {spi_driver = "spi2_driver"}, "hf", "jefe"]
 
 [tasks.gimlet_seq.config]
 fpga_image = "fpga-b.bin"
-register_defs = "gimlet_regs.json"
+register_defs = "gimlet-regs-b.json"
+
+[tasks.hash_driver]
+name = "drv-stm32h7-hash-server"
+features = ["h753"]
+priority = 2
+max-sizes = {flash = 16384, ram=4096 }
+stacksize = 2048
+start = true
+uses = ["hash"]
+interrupts = {"hash.irq" = 1}
+task-slots = ["sys"]
 
 [tasks.hf]
-path = "../../drv/gimlet-hf-server"
 name = "drv-gimlet-hf-server"
-features = ["h753"]
+features = ["h753", "hash"]
 priority = 3
-requires = {flash = 16384, ram = 2048 }
+max-sizes = {flash = 16384, ram = 2048 }
 stacksize = 1920
 start = true
 uses = ["quadspi"]
 interrupts = {"quadspi.irq" = 1}
-task-slots = ["sys"]
+task-slots = ["sys", "hash_driver"]
+
+[tasks.update_server]
+name = "stm32h7-update-server"
+priority = 3
+max-sizes = {flash = 16384, ram = 4096}
+stacksize = 2048
+start = true
+uses = ["flash_controller", "bank2"]
+interrupts = {"flash_controller.irq" = 0b1}
 
 [tasks.sensor]
-path = "../../task/sensor"
 name = "task-sensor"
 features = ["itm"]
-priority = 3
-requires = {flash = 8192, ram = 2048 }
+priority = 4
+max-sizes = {flash = 8192, ram = 2048 }
 stacksize = 1920        # Sensor data is stored on the stack
 start = true
 
+[tasks.host_sp_comms]
+name = "task-host-sp-comms"
+features = ["stm32h753", "uart7", "baud_rate_3M", "hardware_flow_control"]
+uses = ["uart7"]
+interrupts = {"uart7.irq" = 0b01}
+priority = 5
+max-sizes = {flash = 16384, ram = 16384}
+stacksize = 2048
+start = true
+task-slots = ["sys", "gimlet_seq"]
+
 [tasks.udpecho]
-path = "../../task/udpecho"
 name = "task-udpecho"
-priority = 3
-requires = {flash = 16384, ram = 8192}
+priority = 6
+max-sizes = {flash = 16384, ram = 8192}
 stacksize = 4096
 start = true
 task-slots = ["net"]
 features = ["vlan"]
 
 [tasks.udpbroadcast]
-path = "../../task/udpbroadcast"
 name = "task-udpbroadcast"
-priority = 3
-requires = {flash = 16384, ram = 8192}
+priority = 6
+max-sizes = {flash = 16384, ram = 8192}
 stacksize = 2048
 start = true
 task-slots = ["net"]
 features = ["vlan"]
 
+[tasks.udprpc]
+name = "task-udprpc"
+priority = 6
+max-sizes = {flash = 32768, ram = 8192}
+stacksize = 4096
+start = true
+task-slots = ["net"]
+features = ["vlan"]
+
+[tasks.mgmt_gateway]
+name = "task-mgmt-gateway"
+priority = 6
+max-sizes = {flash = 65536, ram = 16384}
+stacksize = 2048
+start = true
+uses = [
+    "usart1",
+    "system_flash", # TODO also used by `net`, both to read the stm32 uid
+]
+task-slots = ["jefe", "net", "update_server", "sys", "hf", "gimlet_seq"]
+features = ["gimlet", "usart1", "vlan", "baud_rate_3M", "hardware_flow_control"]
+interrupts = {"usart1.irq" = 0b10}
+
 [tasks.validate]
-path = "../../task/validate"
 name = "task-validate"
-priority = 3
-requires = {flash = 8192, ram = 4096 }
+priority = 5
+max-sizes = {flash = 16384, ram = 4096 }
 stacksize = 1000 
 start = true
 task-slots = ["i2c_driver"]
 
+[tasks.vpd]
+name = "task-vpd"
+priority = 4
+max-sizes = {flash = 8192, ram = 1024}
+start = true
+task-slots = ["sys", "i2c_driver"]
+stacksize = 800
+
 [tasks.idle]
-path = "../../task/idle"
 name = "task-idle"
-priority = 5
-requires = {flash = 128, ram = 256}
+priority = 7
+max-sizes = {flash = 128, ram = 256}
 stacksize = 256
 start = true
 
@@ -381,12 +409,233 @@ device = "pca9545"
 description = "U.2 IJ/FRUID mux"
 refdes = "U337"
 
+################################################################################
+# Sharkfins
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 1
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin A VPD"
+refdes = "J206"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 1
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin A hot swap controller"
+refdes = "J206"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 2
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin B VPD"
+refdes = "J207"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 2
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin B hot swap controller"
+refdes = "J207"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 3
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin C VPD"
+refdes = "J208"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 3
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin C hot swap controller"
+refdes = "J208"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 4
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin D VPD"
+refdes = "J209"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 1
+segment = 4
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin D hot swap controller"
+refdes = "J209"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 1
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin E VPD"
+refdes = "J210"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 1
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin E hot swap controller"
+refdes = "J210"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 2
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin F VPD"
+refdes = "J211"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 2
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin F hot swap controller"
+refdes = "J211"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 3
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin G VPD"
+refdes = "J212"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 3
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin G hot swap controller"
+refdes = "J212"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 4
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin H VPD"
+refdes = "J213"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 2
+segment = 4
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin H hot swap controller"
+refdes = "J213"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 3
+segment = 1
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin I VPD"
+refdes = "J214"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 3
+segment = 1
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin I hot swap controller"
+refdes = "J214"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 3
+segment = 2
+address = 0b1010_000
+device = "at24csw080"
+description = "U.2 Sharkfin J VPD"
+refdes = "J215"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 3
+segment = 2
+address = 0b0111_000
+device = "max5970"
+description = "U.2 Sharkfin J hot swap controller"
+refdes = "J215"
+removable = true
+
+[[config.i2c.devices]]
+bus = "front"
+mux = 3
+segment = 4
+address = 0b1010_000
+device = "at24csw080"
+description = "Gimlet VPD"
+refdes = "U615"
+
 [[config.i2c.devices]]
 bus = "m2"
 address = 0x73
 device = "pca9545"
 description = "M.2 mux"
 refdes = "U422"
+
+[[config.i2c.devices]]
+bus = "m2"
+mux = 1
+segment = 3
+address = 0b1010_000
+device = "at24csw080"
+description = "Fan VPD"
+refdes = "J180"
+removable = true
 
 [[config.i2c.devices]]
 bus = "m2"
@@ -506,7 +755,9 @@ bus = "rear"
 address = 0x20
 device = "max31790"
 description = "Fan controller"
-sensors = { speed = 6 }
+sensors = { speed = 6, names = [
+    "Southeast", "Northeast", "South", "North", "Southwest", "Northwest"
+] }
 refdes = "U321"
 
 [[config.i2c.devices]]
@@ -783,3 +1034,17 @@ owner = {name = "udpbroadcast", notification = 1}
 port = 997
 tx = { packets = 3, bytes = 1024 }
 rx = { packets = 3, bytes = 1024 }
+
+[config.net.sockets.rpc]
+kind = "udp"
+owner = {name = "udprpc", notification = 1}
+port = 998
+tx = { packets = 3, bytes = 1024 }
+rx = { packets = 3, bytes = 1024 }
+
+[config.net.sockets.mgmt_gateway]
+kind = "udp"
+owner = {name = "mgmt_gateway", notification = 0b01}
+port = 11111 # TODO do we have a documented port for MGS traffic?
+tx = { packets = 3, bytes = 2048 }
+rx = { packets = 3, bytes = 2048 }

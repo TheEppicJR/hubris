@@ -33,9 +33,13 @@ pub fn port1g_flush(
     port_flush_inner(port, v)?;
 
     // 10: Reset the MAC clock domain
+    //
+    // Note that the SDK sets PCS Rx/Tx reset to 0 here, meaning they're not
+    // actually reset.  However, the manual suggests resetting them, and it
+    // doesn't seem to hurt.
     v.modify(dev1g.DEV_CFG_STATUS().DEV_RST_CTRL(), |r| {
-        r.set_pcs_rx_rst(0);
-        r.set_pcs_tx_rst(0);
+        r.set_pcs_rx_rst(1);
+        r.set_pcs_tx_rst(1);
         r.set_mac_rx_rst(1);
         r.set_mac_tx_rst(1);
         r.set_speed_sel(3);
@@ -66,7 +70,7 @@ pub fn port10g_flush(dev: &Dev10g, v: &impl Vsc7448Rw) -> Result<(), VscError> {
     // 2: Disable MAC frame reception
     v.modify(dev10g.MAC_CFG_STATUS().MAC_ENA_CFG(), |r| r.set_rx_ena(0))?;
 
-    port_flush_inner(port.into(), v)?;
+    port_flush_inner(port, v)?;
 
     // 10: Reset the MAC clock domain
     v.modify(dev10g.DEV_CFG_STATUS().DEV_RST_CTRL(), |r| {
@@ -158,5 +162,5 @@ fn port_flush_wait(port: u8, v: &impl Vsc7448Rw) -> Result<(), VscError> {
         }
         hl::sleep_for(1);
     }
-    return Err(VscError::PortFlushTimeout { port });
+    Err(VscError::PortFlushTimeout { port })
 }

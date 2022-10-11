@@ -10,7 +10,7 @@ use drv_i2c_api::*;
 use userlib::units::*;
 
 #[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Register {
     Capabilities = 0x00,
     Configuration = 0x01,
@@ -54,12 +54,12 @@ impl Tse2004Av {
         self.device
             .read_reg::<u8, u16>(reg as u8)
             .map_err(|code| Error::BadRegisterRead { reg, code })
-            .map(|b| u16::from_be(b))
+            .map(u16::from_be)
     }
 }
 
 impl TempSensor<Error> for Tse2004Av {
-    fn read_temperature(&mut self) -> Result<Celsius, Error> {
+    fn read_temperature(&self) -> Result<Celsius, Error> {
         let t: u16 = self.read_reg(Register::AmbientTemp)?;
 
         // The actual temperature is a 13-bit two's complement value.

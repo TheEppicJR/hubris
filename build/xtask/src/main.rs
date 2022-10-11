@@ -4,21 +4,20 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 
 use crate::config::Config;
 
+mod auxflash;
 mod clippy;
 mod config;
 mod dist;
 mod elf;
 mod flash;
-mod gdb;
 mod humility;
 mod sizes;
 mod task_slot;
-mod test;
 
 #[derive(Debug, Parser)]
 #[clap(max_term_width = 80, about = "extra tasks to help you work on Hubris")]
@@ -36,6 +35,10 @@ enum Xtask {
         edges: bool,
         /// Path to the image configuration file, in TOML.
         cfg: PathBuf,
+        /// Allow operation in a dirty checkout, i.e. don't clean before
+        /// rebuilding even if it looks like we need to.
+        #[clap(long)]
+        dirty: bool,
     },
 
     /// Builds one or more cross-compiled binary as it would appear in the
@@ -47,22 +50,40 @@ enum Xtask {
         verbose: bool,
         /// Run `cargo tree --edges features ...` before each invocation of
         /// `cargo rustc ...`
-        #[clap(short, long)]
+        #[clap(short, long, conflicts_with = "list")]
         edges: bool,
+        /// Print a list of all tasks
+        #[clap(short, long)]
+        list: bool,
         /// Path to the image configuration file, in TOML.
         cfg: PathBuf,
         /// Name of task(s) to build.
-        #[clap(min_values = 1)]
+        #[clap(min_values = 1, conflicts_with = "list")]
         tasks: Vec<String>,
+        /// Allow operation in a dirty checkout, i.e. don't clean before
+        /// rebuilding even if it looks like we need to.
+        #[clap(long)]
+        dirty: bool,
     },
 
     /// Runs `xtask dist` and flashes the image onto an attached target
     Flash {
-        /// Request verbosity from tools we shell out to.
-        #[clap(short)]
-        verbose: bool,
-        /// Path to the image configuration file, in TOML.
-        cfg: PathBuf,
+        #[clap(flatten)]
+        args: HumilityArgs,
+        /// Allow operation in a dirty checkout, i.e. don't clean before
+        /// rebuilding even if it looks like we need to.
+        #[clap(long)]
+        dirty: bool,
+    },
+
+    /// Runs `xtask dist`, `xtask flash` and then `humility gdb`
+    Gdb {
+        /// Do not flash a new image; just run `humility gdb`
+        #[clap(long, short)]
+        noflash: bool,
+
+        #[clap(flatten)]
+        args: HumilityArgs,
     },
 
     /// Runs `xtask dist` and reports the sizes of resulting tasks
@@ -72,38 +93,34 @@ enum Xtask {
         verbose: bool,
         /// Path to the image configuration file, in TOML.
         cfg: PathBuf,
-    },
 
-    /// Runs `xtask dist` and then runs a properly configured gdb for you.
-    Gdb {
-        /// Path to the image configuration file, in TOML.
-        cfg: PathBuf,
+        /// Compare this to a previously saved file of sizes
+        #[clap(long)]
+        compare: bool,
 
-        /// Path to the gdb configuation script.
-        gdb_cfg: PathBuf,
+        /// Write JSON out to a file?
+        #[clap(long)]
+        save: bool,
+        /// Allow operation in a dirty checkout, i.e. don't clean before
+        /// rebuilding even if it looks like we need to.
+        #[clap(long)]
+        dirty: bool,
     },
 
     /// Runs `humility`, passing any arguments
     Humility {
-        /// Path to the image configuration file, in TOML.
-        cfg: PathBuf,
-
-        /// Options to pass to Humility
-        options: Vec<String>,
+        #[clap(flatten)]
+        args: HumilityArgs,
     },
 
     /// Runs `xtask dist`, `xtask flash` and then `humility test`
     Test {
-        /// Path to the image configuration file, in TOML.
-        cfg: PathBuf,
-
         /// Do not flash a new image; just run `humility test`
-        #[clap(short)]
+        #[clap(long, short)]
         noflash: bool,
 
-        /// Request verbosity from tools we shell out to.
-        #[clap(short)]
-        verbose: bool,
+        #[clap(flatten)]
+        args: HumilityArgs,
     },
 
     /// Runs `cargo clippy` on a specified task
@@ -116,7 +133,6 @@ enum Xtask {
         cfg: PathBuf,
 
         /// Name of task(s) to check.
-        #[clap(min_values = 1)]
         tasks: Vec<String>,
 
         /// Extra options to pass to clippy
@@ -131,54 +147,146 @@ enum Xtask {
     },
 }
 
-// For commands which may execute on specific packages, this enum
-// identifies the set of packages that should be operated upon.
-fn main() -> Result<()> {
-    let xtask = Xtask::parse();
+#[derive(Clone, Debug, Parser)]
+pub struct HumilityArgs {
+    /// Path to the image configuration file, in TOML.
+    cfg: PathBuf,
 
+    /// Image name to flash
+    #[clap(long)]
+    image_name: Option<String>,
+
+    /// Request verbosity from tools we shell out to.
+    #[clap(short, long)]
+    verbose: bool,
+
+    /// Extra options to pass to Humility
+    #[clap(last = true)]
+    extra_options: Vec<String>,
+}
+
+fn main() -> Result<()> {
+    // Check whether we're running from the right directory
+    if let Ok(root_path) = std::env::var("CARGO_MANIFEST_DIR") {
+        // This is $HUBRIS_DIR/build/xtask/, so we pop twice to get the Hubris
+        // root directory, then compare against our working directory.
+        let root_path = PathBuf::from(root_path);
+        let hubris_dir = root_path.parent().unwrap().parent().unwrap();
+        let current_dir = std::env::current_dir()?;
+        if hubris_dir.canonicalize()? != current_dir.canonicalize()? {
+            bail!(
+                "`cargo xtask` must be run from root directory of Hubris repo"
+            );
+        }
+    }
+
+    let xtask = Xtask::parse();
+    run(xtask)
+}
+
+fn run(xtask: Xtask) -> Result<()> {
     match xtask {
         Xtask::Dist {
             verbose,
             edges,
             cfg,
+            dirty,
         } => {
-            dist::package(verbose, edges, &cfg, None)?;
-            sizes::run(&cfg, true)?;
+            let allocs = dist::package(verbose, edges, &cfg, None, dirty)?;
+            for (_, (a, _)) in allocs {
+                sizes::run(&cfg, &a, true, false, false)?;
+            }
         }
         Xtask::Build {
             verbose,
             edges,
+            list,
             cfg,
             tasks,
+            dirty,
         } => {
-            dist::package(verbose, edges, &cfg, Some(tasks))?;
-        }
-        Xtask::Flash { verbose, cfg } => {
-            dist::package(verbose, false, &cfg, None)?;
-            flash::run(verbose, &cfg)?;
-        }
-        Xtask::Sizes { verbose, cfg } => {
-            dist::package(verbose, false, &cfg, None)?;
-            sizes::run(&cfg, false)?;
-        }
-        Xtask::Gdb { cfg, gdb_cfg } => {
-            dist::package(false, false, &cfg, None)?;
-            gdb::run(&cfg, &gdb_cfg)?;
-        }
-        Xtask::Humility { cfg, options } => {
-            humility::run(&cfg, &options)?;
-        }
-        Xtask::Test {
-            cfg,
-            noflash,
-            verbose,
-        } => {
-            if !noflash {
-                dist::package(verbose, false, &cfg, None)?;
-                flash::run(verbose, &cfg)?;
+            if list {
+                dist::list_tasks(&cfg)?;
+            } else {
+                dist::package(verbose, edges, &cfg, Some(tasks), dirty)?;
             }
+        }
+        Xtask::Flash { dirty, mut args } => {
+            dist::package(args.verbose, false, &args.cfg, None, dirty)?;
+            let toml = Config::from_file(&args.cfg)?;
+            let chip = ["-c", crate::flash::chip_name(&toml.board)?];
+            args.extra_options.push("--force".to_string());
 
-            test::run(verbose, &cfg)?;
+            let image_name = if let Some(ref name) = args.image_name {
+                if !toml.check_image_name(name) {
+                    bail!("Image name {} not declared in TOML", name);
+                }
+                name
+            } else {
+                &toml.image_names[0]
+            };
+
+            humility::run(&args, &chip, Some("flash"), false, image_name)?;
+        }
+        Xtask::Sizes {
+            verbose,
+            cfg,
+            compare,
+            save,
+            dirty,
+        } => {
+            let allocs = dist::package(verbose, false, &cfg, None, dirty)?;
+            for (_, (a, _)) in allocs {
+                sizes::run(&cfg, &a, false, compare, save)?;
+            }
+        }
+        Xtask::Humility { args } => {
+            let toml = Config::from_file(&args.cfg)?;
+            let image_name = if let Some(ref name) = args.image_name {
+                if !toml.check_image_name(name) {
+                    bail!("Image name {} not declared in TOML", name);
+                }
+                name
+            } else {
+                &toml.image_names[0]
+            };
+            humility::run(&args, &[], None, true, image_name)?;
+        }
+        Xtask::Gdb { noflash, mut args } => {
+            let toml = Config::from_file(&args.cfg)?;
+            let image_name = if let Some(ref name) = args.image_name {
+                if !toml.check_image_name(name) {
+                    bail!("Image name {} not declared in TOML", name);
+                }
+                name
+            } else {
+                &toml.image_names[0]
+            };
+            if !noflash {
+                dist::package(args.verbose, false, &args.cfg, None, false)?;
+                // Delegate flashing to `humility gdb`, which also modifies
+                // the GDB startup script slightly (adding `stepi`)
+                args.extra_options.push("--load".to_string());
+            }
+            humility::run(&args, &[], Some("gdb"), true, image_name)?;
+        }
+        Xtask::Test { args, noflash } => {
+            let toml = Config::from_file(&args.cfg)?;
+            let image_name = if let Some(ref name) = args.image_name {
+                if !toml.check_image_name(name) {
+                    bail!("Image name {} not declared in TOML", name);
+                }
+                name
+            } else {
+                &toml.image_names[0]
+            };
+            if !noflash {
+                run(Xtask::Flash {
+                    args: args.clone(),
+                    dirty: false,
+                })?;
+            }
+            humility::run(&args, &[], Some("test"), false, image_name)?;
         }
         Xtask::Clippy {
             verbose,

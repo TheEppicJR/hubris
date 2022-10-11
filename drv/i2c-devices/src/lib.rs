@@ -11,9 +11,11 @@
 //! - [`at24csw080`]: AT24CSW080 serial EEPROM
 //! - [`ds2482`]: DS2482-100 1-wire initiator
 //! - [`isl68224`]: ISL68224 power controller
+//! - [`max5970`]: MAX5970 hot swap controller
 //! - [`max6634`]: MAX6634 temperature sensor
 //! - [`max31790`]: MAX31790 fan controller
 //! - [`mcp9808`]: MCP9808 temperature sensor
+//! - [`pca9538`]: PCA9538 GPIO expander
 //! - [`pct2075`]: PCT2075 temperature sensor
 //! - [`raa229618`]: RAA229618 power controller
 //! - [`sbtsi`]: AMD SB-TSI temperature sensor
@@ -125,7 +127,7 @@ macro_rules! pmbus_validate {
 }
 
 pub trait TempSensor<T: core::convert::Into<drv_i2c_api::ResponseCode>> {
-    fn read_temperature(&mut self) -> Result<userlib::units::Celsius, T>;
+    fn read_temperature(&self) -> Result<userlib::units::Celsius, T>;
 }
 
 pub trait PowerSensor<T: core::convert::Into<drv_i2c_api::ResponseCode>> {
@@ -133,11 +135,11 @@ pub trait PowerSensor<T: core::convert::Into<drv_i2c_api::ResponseCode>> {
 }
 
 pub trait CurrentSensor<T: core::convert::Into<drv_i2c_api::ResponseCode>> {
-    fn read_iout(&mut self) -> Result<userlib::units::Amperes, T>;
+    fn read_iout(&self) -> Result<userlib::units::Amperes, T>;
 }
 
 pub trait VoltageSensor<T: core::convert::Into<drv_i2c_api::ResponseCode>> {
-    fn read_vout(&mut self) -> Result<userlib::units::Volts, T>;
+    fn read_vout(&self) -> Result<userlib::units::Volts, T>;
 }
 
 pub trait Validate<T: core::convert::Into<drv_i2c_api::ResponseCode>> {
@@ -159,8 +161,10 @@ pub mod bmr491;
 pub mod ds2482;
 pub mod isl68224;
 pub mod max31790;
+pub mod max5970;
 pub mod max6634;
 pub mod mcp9808;
+pub mod pca9538;
 pub mod pct2075;
 pub mod raa229618;
 pub mod sbtsi;

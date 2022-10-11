@@ -9,10 +9,6 @@
 use serde::{Deserialize, Serialize};
 use zerocopy::{AsBytes, FromBytes, Unaligned};
 
-/// Magic number that appears at the start of an application header (`App`) to
-/// reassure the kernel that it is not reading uninitialized Flash.
-pub const CURRENT_APP_MAGIC: u32 = 0x1DE_fa7a1;
-
 /// Number of region slots in a `TaskDesc` record. Needs to be less or equal to
 /// than the number of regions in the MPU; may be less to improve context switch
 /// performance. (Though note that changing this alters the ABI.)
@@ -123,36 +119,8 @@ impl Priority {
     }
 }
 
-/// Application header, read by the kernel to load the application.
-///
-/// One copy of this appears in Flash next to the kernel, with the other types
-/// of records following immediately.
-#[derive(Clone, Debug, FromBytes)]
-#[repr(C)]
-pub struct App {
-    /// Reassures the kernel that it is dealing with this kind of an app struct.
-    /// Should have the value `CURRENT_APP_MAGIC`.
-    pub magic: u32,
-    /// Number of tasks. This many `TaskDesc` records will immediately follow
-    /// the `RegionDesc` records that follow the app header.
-    pub task_count: u32,
-    /// Number of memory regions in the address space layout. This many
-    /// `RegionDesc` records will immediately follow the app header.
-    pub region_count: u32,
-    /// Number of interrupt response records that will follow the `RegionDesc`
-    /// records.
-    pub irq_count: u32,
-    /// Bitmask to post to task 0 when any task faults.
-    pub fault_notification: u32,
-
-    /// Reserved expansion space; pads this structure out to 32 bytes. You will
-    /// need to adjust this when you add fields above.
-    pub zeroed_expansion_space: [u8; 32 - (5 * 4)],
-}
-
 /// Record describing a single task.
 #[derive(Clone, Debug, FromBytes, Serialize, Deserialize)]
-#[repr(C)]
 pub struct TaskDesc {
     /// Identifies memory regions this task has access to, by index in the
     /// `RegionDesc` table. If the task needs fewer than `REGIONS_PER_TASK`
@@ -171,15 +139,27 @@ pub struct TaskDesc {
     /// regions (the kernel *will* check this).
     pub initial_stack: u32,
     /// Initial priority of this task.
-    pub priority: u32,
+    pub priority: u8,
     /// Collection of boolean flags controlling task behavior.
     pub flags: TaskFlags,
+    /// Index of this task within the task table.
+    ///
+    /// This field is here as an optimization for the kernel entry sequences. It
+    /// can contain an invalid index if you create an arbitrary invalid
+    /// `TaskDesc`; this will cause the kernel to behave strangely (if the index
+    /// is in range for the task table) or panic predictably (if not), but won't
+    /// violate safety. The build system is careful to generate correct indices
+    /// here.
+    ///
+    /// The index is a u16 to save space in the `TaskDesc` struct; in practice
+    /// other factors limit us to fewer than `2**16` tasks.
+    pub index: u16,
 }
 
 bitflags::bitflags! {
     #[derive(FromBytes, Serialize, Deserialize)]
     #[repr(transparent)]
-    pub struct TaskFlags: u32 {
+    pub struct TaskFlags: u8 {
         const START_AT_BOOT = 1 << 0;
         const RESERVED = !1;
     }
@@ -195,7 +175,6 @@ bitflags::bitflags! {
 /// two regions pointing to the same area of the address space, but one
 /// read-only and the other read-write.
 #[derive(Clone, Debug, FromBytes, Serialize, Deserialize)]
-#[repr(C)]
 pub struct RegionDesc {
     /// Address of start of region. The platform likely has alignment
     /// requirements for this; it must meet them. (For example, on ARMv7-M, it
@@ -207,8 +186,6 @@ pub struct RegionDesc {
     pub size: u32,
     /// Flags describing what can be done with this region.
     pub attributes: RegionAttributes,
-    /// Reserved word, must be zero.
-    pub reserved_zero: u32,
 }
 
 bitflags::bitflags! {
@@ -238,7 +215,17 @@ bitflags::bitflags! {
 
 /// Newtype wrapper for an interrupt index
 #[derive(
-    Copy, Clone, Debug, FromBytes, Serialize, Deserialize, Hash, Eq, PartialEq,
+    Copy,
+    Clone,
+    Debug,
+    FromBytes,
+    Serialize,
+    Deserialize,
+    Hash,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
 )]
 #[repr(transparent)]
 pub struct InterruptNum(pub u32);
@@ -247,11 +234,29 @@ impl phash::PerfectHash for InterruptNum {
         self.0.wrapping_mul(v) as usize
     }
 }
+impl InterruptNum {
+    pub const fn invalid() -> Self {
+        Self(u32::MAX)
+    }
+    pub fn is_valid(&self) -> bool {
+        self.0 != u32::MAX
+    }
+}
 
 /// Struct containing the task which waits for an interrupt, and the expected
 /// notification mask associated with the IRQ.
 #[derive(
-    Copy, Clone, Debug, FromBytes, Serialize, Deserialize, Hash, Eq, PartialEq,
+    Copy,
+    Clone,
+    Debug,
+    FromBytes,
+    Serialize,
+    Deserialize,
+    Hash,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
 )]
 pub struct InterruptOwner {
     /// Which task to notify, by index.
@@ -264,6 +269,17 @@ impl phash::PerfectHash for InterruptOwner {
         self.task
             .wrapping_mul(v)
             .wrapping_add(self.notification.wrapping_mul(!v)) as usize
+    }
+}
+impl InterruptOwner {
+    pub const fn invalid() -> Self {
+        Self {
+            task: u32::MAX,
+            notification: 0,
+        }
+    }
+    pub fn is_valid(&self) -> bool {
+        !(self.task == u32::MAX && self.notification == 0)
     }
 }
 
@@ -582,6 +598,30 @@ impl core::convert::TryFrom<u32> for Sysnum {
     }
 }
 
+/// Representation of kipc numbers
+pub enum Kipcnum {
+    ReadTaskStatus = 1,
+    RestartTask = 2,
+    FaultTask = 3,
+    ReadImageId = 4,
+    Reset = 5,
+}
+
+impl core::convert::TryFrom<u16> for Kipcnum {
+    type Error = ();
+
+    fn try_from(x: u16) -> Result<Self, Self::Error> {
+        match x {
+            1 => Ok(Self::ReadTaskStatus),
+            2 => Ok(Self::RestartTask),
+            3 => Ok(Self::FaultTask),
+            4 => Ok(Self::ReadImageId),
+            5 => Ok(Self::Reset),
+            _ => Err(()),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Debug, FromBytes, AsBytes)]
 pub struct SAUEntry {
@@ -597,6 +637,8 @@ pub struct ImageHeader {
     pub magic: u32,
     pub total_image_len: u32,
     pub sau_entries: [SAUEntry; 8],
+    pub version: u32,
+    pub epoch: u32,
 }
 
 // Corresponds to the ARM vector table, limited to what we need

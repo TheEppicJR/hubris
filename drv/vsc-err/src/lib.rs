@@ -10,16 +10,15 @@
 #![no_std]
 
 use drv_spi_api::SpiError;
+use idol_runtime::ServerDeath;
 
-#[cfg(feature = "mgmt")]
-use task_net_api::NetError;
-
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VscError {
     SpiError(SpiError),
-
-    #[cfg(feature = "mgmt")]
-    NetError(NetError),
+    ServerDied,
+    /// Error code produced by a proxy device handling PHY register
+    /// reads/writes.
+    ProxyError(u16),
 
     BadChipId(u32),
     Serdes1gReadTimeout {
@@ -68,6 +67,8 @@ pub enum VscError {
     /// an unexpected CRC.
     PhyPatchFailedCrc,
     PhyInitTimeout,
+    /// An error was returned when executing a Phy command
+    PhyCommandError(u16),
     /// Returned by functions that support both the VSC8552 and VSC8562, when
     /// the PHY id doesn't match either.
     UnknownPhyId(u32),
@@ -90,11 +91,13 @@ pub enum VscError {
     MiimReadErr {
         miim: u8,
         phy: u8,
-        page: u16,
         addr: u8,
     },
     MiimIdleTimeout,
     MiimReadTimeout,
+
+    /// Provided an invalid argument
+    OutOfRange,
 }
 
 impl From<SpiError> for VscError {
@@ -103,9 +106,8 @@ impl From<SpiError> for VscError {
     }
 }
 
-#[cfg(feature = "mgmt")]
-impl From<NetError> for VscError {
-    fn from(s: NetError) -> Self {
-        Self::NetError(s)
+impl From<ServerDeath> for VscError {
+    fn from(_s: ServerDeath) -> Self {
+        Self::ServerDied
     }
 }

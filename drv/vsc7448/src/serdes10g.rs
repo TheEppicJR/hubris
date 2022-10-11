@@ -7,13 +7,13 @@ use crate::{Vsc7448Rw, VscError};
 use userlib::hl;
 use vsc7448_pac::*;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
-    Lan10g,
+    Lan10g(SerdesPresetType),
     Sgmii,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     f_pll_khz_plain: u32,
 
@@ -39,7 +39,7 @@ impl Config {
     pub fn new(mode: Mode) -> Result<Self, VscError> {
         let mut f_pll = FrequencySetup::new(mode);
         let if_width = match mode {
-            Mode::Lan10g => 32,
+            Mode::Lan10g(..) => 32,
             Mode::Sgmii => 10,
         };
 
@@ -99,7 +99,10 @@ impl Config {
 
         ////////////////////////////////////////////////////////////////////////
         // `vtss_calc_sd10g65_setup_rx`
-        let preset_type = SerdesPresetType::DacHw;
+        let preset_type = match mode {
+            Mode::Lan10g(t) => t,
+            Mode::Sgmii => SerdesPresetType::DacHw,
+        };
         let rx_preset = SerdesRxPreset::new(preset_type);
         let apc_preset = SerdesApcPreset::new(preset_type, optimize_for_1g);
 
@@ -133,7 +136,7 @@ impl Config {
         v.modify(XGXFI(index).XFI_CONTROL().XFI_MODE(), |r| {
             r.set_port_sel(match self.mode {
                 Mode::Sgmii => 1,
-                Mode::Lan10g => 0,
+                Mode::Lan10g(..) => 0,
             })
         })?;
         // Unclear if these all need to be in separate messages, but let's
@@ -714,13 +717,14 @@ impl Config {
 }
 
 /// Equivalent to `vtss_sd10g65_preset_t`
-#[derive(Copy, Clone, PartialEq)]
-enum SerdesPresetType {
-    DacHw,
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SerdesPresetType {
+    DacHw, // VTSS_SD10G65_DAC_HW
+    KrHw,  // VTSS_SD10G65_KR_HW, i.e. 10GBASE-KR
 }
 
 /// Equivalent to `vtss_sd10g65_preset_struct_t`
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct SerdesRxPreset {
     synth_phase_data: u8,
     ib_main_thres_offs: u8,
@@ -761,11 +765,28 @@ impl SerdesRxPreset {
                 ib_eqz_c_adj: 0,
                 synth_dv_ctrl_i1e: 0,
             },
+            SerdesPresetType::KrHw => Self {
+                synth_phase_data: 54,
+                ib_main_thres_offs: 0,
+                ib_vscope_hl_offs: 10,
+                ib_bias_adj: 31,
+                ib_sam_offs_adj: 16,
+                ib_eq_ld1_offset: 20,
+                ib_eqz_l_mode: 3,
+                ib_eqz_c_mode: 1,
+                ib_dfe_gain_adj: 63,
+                ib_rib_adj: 8,
+                ib_tc_eq: 0,
+                ib_tc_dfe: 0,
+                ib_ena_400_inp: 1,
+                ib_eqz_c_adj: 0,
+                synth_dv_ctrl_i1e: 0,
+            },
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct SerdesApcPreset {
     ld_lev_ini: u8,
     range_sel: u8,
@@ -807,11 +828,28 @@ impl SerdesApcPreset {
                 agc_max: 216,
                 agc_ini: 168,
             },
+            SerdesPresetType::KrHw => Self {
+                ld_lev_ini: 8,
+                range_sel: 20,
+                dfe1_min: 0,
+                dfe1_max: 127,
+                c_min: 0,
+                c_max: 31,
+                c_ini: 11,
+                c_rs_offs: 3,
+                l_min: 0,
+                l_max: 124,
+                l_ini: 44,
+                l_rs_offs: 1,
+                agc_min: 0,
+                agc_max: 248,
+                agc_ini: 88,
+            },
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct SynthSettingsCalc {
     freq_mult: u16,
     freqm: u64,
@@ -856,7 +894,7 @@ fn calc_gcd(num_in: u64, mut div: u64) -> u64 {
     div
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FrequencySetup {
     f_pll_khz: u32,
     ratio_num: u32,
@@ -865,7 +903,7 @@ pub struct FrequencySetup {
 impl FrequencySetup {
     pub fn new(mode: Mode) -> Self {
         match mode {
-            Mode::Lan10g => FrequencySetup {
+            Mode::Lan10g(..) => FrequencySetup {
                 // 10.3125Gbps
                 f_pll_khz: 10_000_000,
                 ratio_num: 66,
@@ -882,7 +920,7 @@ impl FrequencySetup {
 }
 
 /// Roughly based on `vtss_sd10g65_synth_mult_calc_rslt_t`
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct SynthMultCalc {
     speed_sel: bool, // SYNTH_SPEED_SEL
     fbdiv_sel: u8,   // SYNTH_FBDIV_SEL
@@ -928,7 +966,7 @@ impl SynthMultCalc {
         };
         out.settings = SynthSettingsCalc::new(num_in_tmp, div_in_tmp);
 
-        out.speed_sel = if dr_khz < 5_000_000 { true } else { false };
+        out.speed_sel = dr_khz < 5_000_000;
         out.freq_mult_byp =
             FrequencyDecoderBypass::new(out.settings.freq_mult)?;
 
@@ -936,7 +974,7 @@ impl SynthMultCalc {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct FrequencyDecoderBypass {
     freq_mult: u16,
     freq_mult_hi: u8,

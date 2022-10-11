@@ -24,7 +24,7 @@
 use core::cell::Cell;
 use core::cell::RefCell;
 use drv_i2c_api::*;
-use drv_stm32h7_i2c::*;
+use drv_stm32xx_i2c::*;
 use drv_stm32xx_sys_api::*;
 use ringbuf::*;
 use userlib::*;
@@ -55,6 +55,8 @@ fn configure_pins(pins: &[I2cPin]) {
 //
 static mut SPD_DATA: [u8; 8192] = [0; 8192];
 
+// Keep this in i2c address form
+#[allow(clippy::unusual_byte_groupings)]
 const LTC4306_ADDRESS: u8 = 0b1001_010;
 type Bank = (Controller, drv_i2c_api::PortIndex, Option<(Mux, Segment)>);
 
@@ -100,7 +102,7 @@ fn read_spd_data(
             .unwrap();
         let page = I2cDevice::new(i2c_task, controller, port, None, addr);
 
-        if let Err(_) = page.write(&[0]) {
+        if page.write(&[0]).is_err() {
             //
             // If our operation fails, we are going to assume that there
             // are no DIMMs on this bank.
@@ -299,13 +301,11 @@ fn main() -> ! {
             } else {
                 false
             }
+        } else if addr == LTC4306_ADDRESS {
+            ltc4306.set(ltc4306::State::init());
+            true
         } else {
-            if addr == LTC4306_ADDRESS {
-                ltc4306.set(ltc4306::State::init());
-                true
-            } else {
-                false
-            }
+            false
         };
 
         ringbuf_entry!(Trace::Initiate(addr, rval));
@@ -380,17 +380,10 @@ fn main() -> ! {
                     let offs = (ndx * spd::MAX_SIZE) + voffs[ndx] as usize;
                     let rbyte = spd_data[offs + page.get().offset()];
 
-                    //
-                    // It is actually our intent to overflow the add (that is,
-                    // when performing a read at offset 0xff, the next read
-                    // should be at offset 0x00), but Rust (rightfully) isn't
-                    // so into that -- so unwrap what we're doing.
-                    //
-                    voffs[ndx] = if voffs[ndx] == u8::MAX {
-                        0
-                    } else {
-                        voffs[ndx] + 1
-                    };
+                    // It is our intent to overflow the add (that is, when
+                    // performing a read at offset 0xff, the next read should
+                    // be at offset 0x00).
+                    voffs[ndx] = voffs[ndx].wrapping_add(1);
 
                     Some(rbyte)
                 }

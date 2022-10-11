@@ -11,6 +11,9 @@ use ksz8463::{
     Error as KszError, MIBCounter, MIBCounterValue, Register as KszRegister,
 };
 use ringbuf::*;
+use task_net_api::{
+    ManagementCounters, ManagementLinkStatus, MgmtError, PhyError,
+};
 use userlib::task_slot;
 use vsc7448_pac::{phy, types::PhyRegisterAddress};
 use vsc85xx::VscError;
@@ -18,7 +21,7 @@ use vsc85xx::VscError;
 task_slot!(SPI, spi_driver);
 task_slot!(USER_LEDS, user_leds);
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Trace {
     None,
     BspConfigured,
@@ -38,7 +41,6 @@ enum Trace {
         port: u8,
         counter: MIBCounterValue,
     },
-    Ksz8463MacTable(ksz8463::MacTableEntry),
 
     Vsc8552Status {
         port: u8,
@@ -131,6 +133,10 @@ impl Bsp {
             ksz8463_spi: Spi::from(SPI.get_task_id()).device(0),
             ksz8463_nrst: Port::A.pin(9),
             ksz8463_rst_type: mgmt::Ksz8463ResetSpeed::Slow,
+
+            #[cfg(feature = "vlan")]
+            ksz8463_vlan_mode: ksz8463::VLanMode::Mandatory,
+            #[cfg(not(feature = "vlan"))]
             ksz8463_vlan_mode: ksz8463::VLanMode::Optional,
 
             vsc85x2_coma_mode: None,
@@ -178,18 +184,11 @@ impl Bsp {
             });
         }
 
-        // Read the MAC table for fun
-        ringbuf_entry!(match self.ksz8463.read_dynamic_mac_table(0) {
-            Ok(Some(mac)) => Trace::Ksz8463MacTable(mac),
-            Ok(None) => Trace::Ksz8463EmptyMacTable,
-            Err(err) => Trace::KszErr { err },
-        });
-
         let mut any_comma = false;
         let mut any_link = false;
         let rw = &mut MiimBridge::new(eth);
         for i in [0, 1] {
-            let mut phy = self.mgmt.vsc85x2.phy(i, rw).phy;
+            let phy = self.mgmt.vsc85x2.phy(i, rw).phy;
             let port = phy.port;
 
             ringbuf_entry!(match phy.read(phy::STANDARD::MODE_STATUS()) {
@@ -226,8 +225,8 @@ impl Bsp {
                 .read(phy::EXTENDED_3::MAC_SERDES_PCS_STATUS())
             {
                 Ok(status) => {
-                    any_link |= (status.0 & (1 << 2)) != 0;
-                    any_comma |= (status.0 & (1 << 0)) != 0;
+                    any_link |= status.mac_link_status() != 0;
+                    any_comma |= status.mac_pcs_sig_detect() != 0;
                     Trace::Vsc8552MacPcsStatus { port, status }
                 }
                 Err(err) => Trace::Vsc8552Err { err },
@@ -258,5 +257,42 @@ impl Bsp {
         } else {
             self.leds.led_off(2).unwrap();
         }
+    }
+
+    pub fn phy_read(
+        &mut self,
+        port: u8,
+        reg: PhyRegisterAddress<u16>,
+        eth: &crate::eth::Ethernet,
+    ) -> Result<u16, PhyError> {
+        self.mgmt.phy_read(port, reg, eth)
+    }
+
+    pub fn phy_write(
+        &mut self,
+        port: u8,
+        reg: PhyRegisterAddress<u16>,
+        value: u16,
+        eth: &crate::eth::Ethernet,
+    ) -> Result<(), PhyError> {
+        self.mgmt.phy_write(port, reg, value, eth)
+    }
+
+    pub fn ksz8463(&self) -> &ksz8463::Ksz8463 {
+        &self.mgmt.ksz8463
+    }
+
+    pub fn management_link_status(
+        &self,
+        eth: &crate::eth::Ethernet,
+    ) -> Result<ManagementLinkStatus, MgmtError> {
+        self.mgmt.management_link_status(eth)
+    }
+
+    pub fn management_counters(
+        &self,
+        eth: &crate::eth::Ethernet,
+    ) -> Result<ManagementCounters, MgmtError> {
+        self.mgmt.management_counters(eth)
     }
 }

@@ -17,13 +17,15 @@ use drv_gimlet_seq_api::{PowerState, SeqError};
 use drv_ice40_spi_program as ice40;
 use drv_spi_api as spi_api;
 use drv_stm32xx_sys_api as sys_api;
-use idol_runtime::RequestError;
+use idol_runtime::{NotificationHandler, RequestError};
 use seq_spi::{Addr, Reg};
+use task_jefe_api::Jefe;
 
 task_slot!(SYS, sys);
 task_slot!(SPI, spi_driver);
 task_slot!(I2C, i2c_driver);
 task_slot!(HF, hf);
+task_slot!(JEFE, jefe);
 
 include!(concat!(env!("OUT_DIR"), "/i2c_config.rs"));
 
@@ -32,6 +34,8 @@ mod payload;
 #[derive(Copy, Clone, PartialEq)]
 enum Trace {
     Ice40Rails(bool, bool),
+    IdentValid(bool),
+    ChecksumValid(bool),
     Reprogram(bool),
     Programmed,
     Programming,
@@ -43,12 +47,14 @@ enum Trace {
     A2,
     A1Power(u8, u8),
     A0Power(u8),
+    NICPowerEnableLow(bool),
     RailsOn,
     UartEnabled,
-    GetState(TaskId),
+    GetState,
     SetState(PowerState, PowerState),
     ClockConfigWrite,
     ClockConfigSuccess,
+    Status(u8, u8, u8),
     None,
 }
 
@@ -58,6 +64,19 @@ ringbuf!(Trace, 64, Trace::None);
 fn main() -> ! {
     let spi = spi_api::Spi::from(SPI.get_task_id());
     let sys = sys_api::Sys::from(SYS.get_task_id());
+    let jefe = Jefe::from(JEFE.get_task_id());
+    let hf = hf_api::HostFlash::from(HF.get_task_id());
+
+    // Turn off the chassis LED, in case this is a task restart (and not a
+    // full chip restart, which would leave the GPIO unconfigured).
+    sys.gpio_configure_output(
+        CHASSIS_LED,
+        sys_api::OutputType::PushPull,
+        sys_api::Speed::Low,
+        sys_api::Pull::None,
+    )
+    .unwrap();
+    sys.gpio_reset(CHASSIS_LED).unwrap();
 
     // To allow for the possibility that we are restarting, rather than
     // starting, we take care during early sequencing to _not turn anything
@@ -68,6 +87,10 @@ fn main() -> ! {
     //
     // This is the expected reset state, but, good to be sure.
     sys.gpio_configure_input(PGS_PINS, PGS_PULL).unwrap();
+
+    // Set SP3_TO_SP_NIC_PWREN_L to be an input
+    sys.gpio_configure_input(NIC_PWREN_L_PINS, NIC_PWREN_L_PULL)
+        .unwrap();
 
     // Unconditionally set our sequencing-related GPIOs to outputs.
     //
@@ -206,12 +229,15 @@ fn main() -> ! {
     // serve up a recognizable ident code.
     let seq = seq_spi::SequencerFpga::new(spi.device(SEQ_SPI_DEVICE));
 
-    // TODO: the ident is not sufficient for distinguishing the various Gimlet
-    // FPGA images that are floating around, so, we need to always reprogram it.
-    //
-    //let reprogram = !seq.valid_ident();
-    let reprogram = true;
+    // If the image announces the correct identifier and has a matching
+    // bitstream checksum, then we can skip reprogramming;
+    let ident_valid = seq.valid_ident();
+    ringbuf_entry!(Trace::IdentValid(ident_valid));
 
+    let checksum_valid = seq.valid_checksum();
+    ringbuf_entry!(Trace::ChecksumValid(checksum_valid));
+
+    let reprogram = !ident_valid || !checksum_valid;
     ringbuf_entry!(Trace::Reprogram(reprogram));
 
     // We only want to reset and reprogram the FPGA when absolutely required.
@@ -246,6 +272,13 @@ fn main() -> ! {
             // active low.
             sys.gpio_set(pin).unwrap();
         }
+
+        // Store our bitstream checksum in the FPGA's checksum registers
+        // (which are initialized to zero).  This value is read back before
+        // programming the FPGA image (e.g. if this task restarts or the SP
+        // itself is reflashed), and used to decide whether FPGA programming
+        // is required.
+        seq.write_checksum().unwrap();
     }
 
     ringbuf_entry!(Trace::Programmed);
@@ -259,7 +292,7 @@ fn main() -> ! {
     loop {
         let mut status = [0u8];
 
-        seq.read_bytes(Addr::PWRCTRL, &mut status).unwrap();
+        seq.read_bytes(Addr::PWR_CTRL, &mut status).unwrap();
         ringbuf_entry!(Trace::A1Status(status[0]));
 
         if status[0] == 0 {
@@ -289,31 +322,138 @@ fn main() -> ! {
     })
     .unwrap();
 
+    jefe.set_state(PowerState::A2 as u32);
+
     ringbuf_entry!(Trace::ClockConfigSuccess);
     ringbuf_entry!(Trace::A2);
+
+    // Turn on the chassis LED once we reach A2
+    sys.gpio_set(CHASSIS_LED).unwrap();
 
     let mut buffer = [0; idl::INCOMING_SIZE];
     let mut server = ServerImpl {
         state: PowerState::A2,
         seq,
+        jefe,
+        hf,
+        deadline: 0,
     };
 
     loop {
-        idol_runtime::dispatch(&mut buffer, &mut server);
+        idol_runtime::dispatch_n(&mut buffer, &mut server);
     }
 }
 
 struct ServerImpl {
     state: PowerState,
     seq: seq_spi::SequencerFpga,
+    jefe: Jefe,
+    hf: hf_api::HostFlash,
+    deadline: u64,
+}
+
+const TIMER_MASK: u32 = 1 << 0;
+const TIMER_INTERVAL: u64 = 10;
+
+impl NotificationHandler for ServerImpl {
+    fn current_notification_mask(&self) -> u32 {
+        TIMER_MASK
+    }
+
+    fn handle_notification(&mut self, _bits: u32) {
+        ringbuf_entry!(Trace::Status(
+            self.seq.read_byte(Addr::IER).unwrap(),
+            self.seq.read_byte(Addr::IFR).unwrap(),
+            self.seq.read_byte(Addr::AMD_STATUS).unwrap(),
+        ));
+
+        if self.state == PowerState::A0 || self.state == PowerState::A0PlusHP {
+            //
+            // The first order of business is to check if the sequencer hit a
+            // THERMTRIP.  If it did, we need to go to A0Thermtrip and clear
+            // the bit.
+            //
+            let thermtrip = Reg::IFR::THERMTRIP;
+            let ifr = self.seq.read_byte(Addr::IFR).unwrap();
+
+            if ifr & thermtrip != 0 {
+                self.seq.clear_bytes(Addr::IFR, &[thermtrip]).unwrap();
+                self.update_state_internal(PowerState::A0Thermtrip);
+            }
+
+            //
+            // Now we need to check NIC_PWREN_L to assure that our power state
+            // matches it, clearing or setting NIC_CTRL in the sequencer as
+            // needed.
+            //
+            let sys = sys_api::Sys::from(SYS.get_task_id());
+            let pwren_l = sys.gpio_read(NIC_PWREN_L_PINS).unwrap() != 0;
+
+            ringbuf_entry!(Trace::NICPowerEnableLow(pwren_l));
+
+            let cld_rst = Reg::NIC_CTRL::CLD_RST;
+
+            match (self.state, pwren_l) {
+                (PowerState::A0, false) => {
+                    self.seq.clear_bytes(Addr::NIC_CTRL, &[cld_rst]).unwrap();
+                    self.update_state_internal(PowerState::A0PlusHP);
+                }
+
+                (PowerState::A0PlusHP, true) => {
+                    self.seq.set_bytes(Addr::NIC_CTRL, &[cld_rst]).unwrap();
+                    self.update_state_internal(PowerState::A0);
+                }
+
+                (PowerState::A0, true) | (PowerState::A0PlusHP, false) => {
+                    //
+                    // Our power state matches NIC_PWREN_L -- nothing to do
+                    //
+                }
+
+                _ => {
+                    //
+                    // We can only be in this larger block if the state is A0
+                    // or A0PlusHP; we must have matched one of the arms above.
+                    //
+                    unreachable!();
+                }
+            }
+        }
+
+        if let Some(interval) = self.poll_interval() {
+            self.deadline += interval;
+            sys_set_timer(Some(self.deadline), TIMER_MASK);
+        }
+    }
+}
+
+impl ServerImpl {
+    fn update_state_internal(&mut self, state: PowerState) {
+        self.state = state;
+        self.jefe.set_state(state as u32);
+    }
+
+    //
+    // Return the current timer interval, in milliseconds.  If we are in A0,
+    // we are polling for NIC_PWREN_L; if we are in A0PlusHP, we are polling
+    // for a thermtrip or for someone disabling NIC_PWREN_L.  If we are in
+    // any other state, we don't need to poll.
+    //
+    fn poll_interval(&self) -> Option<u64> {
+        match self.state {
+            PowerState::A0 => Some(10),
+            PowerState::A0PlusHP => Some(100),
+            _ => None,
+        }
+    }
 }
 
 impl idl::InOrderSequencerImpl for ServerImpl {
     fn get_state(
         &mut self,
-        rm: &RecvMessage,
+        _: &RecvMessage,
     ) -> Result<PowerState, RequestError<SeqError>> {
-        ringbuf_entry!(Trace::GetState(rm.sender));
+        ringbuf_entry!(Trace::GetState);
         Ok(self.state)
     }
 
@@ -329,17 +469,15 @@ impl idl::InOrderSequencerImpl for ServerImpl {
                 //
                 // First, set our mux state to be the HostCPU
                 //
-                let hf = hf_api::HostFlash::from(HF.get_task_id());
-
-                if let Err(_) = hf.set_mux(hf_api::HfMuxState::HostCPU) {
+                if self.hf.set_mux(hf_api::HfMuxState::HostCPU).is_err() {
                     return Err(SeqError::MuxToHostCPUFailed.into());
                 }
 
                 //
                 // We are going to pass through A1 on the way to A0.
                 //
-                let a1a0 = Reg::PWRCTRL::A1PWREN | Reg::PWRCTRL::A0A_EN;
-                self.seq.write_bytes(Addr::PWRCTRL, &[a1a0]).unwrap();
+                let a1a0 = Reg::PWR_CTRL::A1PWREN | Reg::PWR_CTRL::A0A_EN;
+                self.seq.write_bytes(Addr::PWR_CTRL, &[a1a0]).unwrap();
 
                 loop {
                     let mut power = [0u8, 0u8];
@@ -377,27 +515,38 @@ impl idl::InOrderSequencerImpl for ServerImpl {
                 }
 
                 //
+                // And establish our timer to check SP3_TO_SP_NIC_PWREN_L.
+                //
+                self.deadline = sys_get_timer().now + TIMER_INTERVAL;
+                sys_set_timer(Some(self.deadline), TIMER_MASK);
+
+                //
                 // Finally, enable transmission to the SP3's UART
                 //
                 uart_sp_to_sp3_enable();
                 ringbuf_entry!(Trace::UartEnabled);
 
-                self.state = PowerState::A0;
+                self.update_state_internal(PowerState::A0);
                 Ok(())
             }
 
-            (PowerState::A0, PowerState::A2) => {
-                let hf = hf_api::HostFlash::from(HF.get_task_id());
-                let a1a0 = Reg::PWRCTRL::A0C_DIS;
+            (PowerState::A0, PowerState::A2)
+            | (PowerState::A0PlusHP, PowerState::A2)
+            | (PowerState::A0Thermtrip, PowerState::A2) => {
+                //
+                // Flip the UART mux back to disabled
+                //
+                uart_sp_to_sp3_disable();
 
-                self.seq.write_bytes(Addr::PWRCTRL, &[a1a0]).unwrap();
+                let a1a0 = Reg::PWR_CTRL::A1PWREN | Reg::PWR_CTRL::A0A_EN;
+                self.seq.clear_bytes(Addr::PWR_CTRL, &[a1a0]).unwrap();
                 vcore_soc_off();
 
-                if let Err(_) = hf.set_mux(hf_api::HfMuxState::SP) {
+                if self.hf.set_mux(hf_api::HfMuxState::SP).is_err() {
                     return Err(SeqError::MuxToSPFailed.into());
                 }
 
-                self.state = PowerState::A2;
+                self.update_state_internal(PowerState::A2);
                 ringbuf_entry!(Trace::A2);
                 Ok(())
             }
@@ -425,16 +574,6 @@ impl idl::InOrderSequencerImpl for ServerImpl {
             .unwrap();
         Ok(())
     }
-
-    //
-    // By the time we are hanging out the shingle, the clock config is loaded.
-    //
-    fn is_clock_config_loaded(
-        &mut self,
-        _: &RecvMessage,
-    ) -> Result<u8, RequestError<SeqError>> {
-        Ok(1)
-    }
 }
 
 fn reprogram_fpga(
@@ -442,7 +581,7 @@ fn reprogram_fpga(
     sys: &sys_api::Sys,
     config: &ice40::Config,
 ) -> Result<(), ice40::Ice40Error> {
-    ice40::begin_bitstream_load(&spi, &sys, &config)?;
+    ice40::begin_bitstream_load(spi, sys, config)?;
 
     // We've got the bitstream in Flash, so we can technically just send it in
     // one transaction, but we'll want chunking later -- so let's make sure
@@ -453,10 +592,10 @@ fn reprogram_fpga(
     while !bitstream.is_empty() || !decompressor.is_idle() {
         let out =
             gnarle::decompress(&mut decompressor, &mut bitstream, &mut chunk);
-        ice40::continue_bitstream_load(&spi, out)?;
+        ice40::continue_bitstream_load(spi, out)?;
     }
 
-    ice40::finish_bitstream_load(&spi, &sys, &config)
+    ice40::finish_bitstream_load(spi, sys, config)
 }
 
 static COMPRESSED_BITSTREAM: &[u8] =
@@ -505,7 +644,7 @@ cfg_if::cfg_if! {
             sys.gpio_configure_output(
                 UART_TX_ENABLE,
                 sys_api::OutputType::PushPull,
-                sys_api::Speed::High,
+                sys_api::Speed::Low,
                 sys_api::Pull::None,
             )
             .unwrap();
@@ -513,6 +652,19 @@ cfg_if::cfg_if! {
             sys.gpio_reset(UART_TX_ENABLE).unwrap();
         }
 
+        fn uart_sp_to_sp3_disable() {
+            let sys = sys_api::Sys::from(SYS.get_task_id());
+
+            sys.gpio_configure_output(
+                UART_TX_ENABLE,
+                sys_api::OutputType::PushPull,
+                sys_api::Speed::Low,
+                sys_api::Pull::None,
+            )
+            .unwrap();
+
+            sys.gpio_set(UART_TX_ENABLE).unwrap();
+        }
         const ENABLES_PORT: sys_api::Port = sys_api::Port::A;
         const ENABLE_V1P2_MASK: u16 = 1 << 15;
         const ENABLE_V3P3_MASK: u16 = 1 << 4;
@@ -541,8 +693,16 @@ cfg_if::cfg_if! {
             pin_mask: PG_V1P2_MASK | PG_V3P3_MASK
         };
 
+        // SP_STATUS_LED
+        const CHASSIS_LED: sys_api::PinSet = sys_api::Port::A.pin(3);
+
         // Gimlet provides external pullups.
         const PGS_PULL: sys_api::Pull = sys_api::Pull::None;
+
+        const NIC_PWREN_L_PINS: sys_api::PinSet = sys_api::Port::F.pin(4);
+
+        // Externally pulled to V3P3_SYS_A0
+        const NIC_PWREN_L_PULL: sys_api::Pull = sys_api::Pull::None;
 
         fn vcore_soc_off() {
             use drv_i2c_devices::raa229618::Raa229618;
@@ -572,7 +732,7 @@ cfg_if::cfg_if! {
             vddcr_soc.turn_on().unwrap();
         }
     } else {
-        compiler_error!("unsupported target board");
+        compile_error!("unsupported target board");
     }
 }
 

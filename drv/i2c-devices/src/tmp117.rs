@@ -9,7 +9,7 @@ use drv_i2c_api::*;
 use userlib::units::*;
 
 #[allow(dead_code)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Register {
     TempResult = 0x00,
     Configuration = 0x01,
@@ -58,11 +58,16 @@ impl Tmp117 {
     fn read_reg(&self, reg: Register) -> Result<(u8, u8), Error> {
         match self.device.read_reg::<u8, [u8; 2]>(reg as u8) {
             Ok(buf) => Ok((buf[0], buf[1])),
-            Err(code) => Err(Error::BadRegisterRead {
-                reg: reg,
-                code: code,
-            }),
+            Err(code) => Err(Error::BadRegisterRead { reg, code }),
         }
+    }
+
+    pub fn read_eeprom(&self) -> Result<[u8; 6], Error> {
+        let ee1 = self.read_reg(Register::EEPROM1)?;
+        let ee2 = self.read_reg(Register::EEPROM2)?;
+        let ee3 = self.read_reg(Register::EEPROM3)?;
+
+        Ok([ee1.0, ee1.1, ee2.0, ee2.1, ee3.0, ee3.1])
     }
 }
 
@@ -75,7 +80,7 @@ impl Validate<Error> for Tmp117 {
 }
 
 impl TempSensor<Error> for Tmp117 {
-    fn read_temperature(&mut self) -> Result<Celsius, Error> {
+    fn read_temperature(&self) -> Result<Celsius, Error> {
         Ok(convert(self.read_reg(Register::TempResult)?))
     }
 }

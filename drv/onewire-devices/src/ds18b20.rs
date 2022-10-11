@@ -37,7 +37,7 @@ use userlib::units::*;
 
 /// A DS18B20 command
 #[allow(dead_code)]
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub enum Command {
     ConvertT = 0x44,
     WriteScratchpad = 0x4e,
@@ -71,7 +71,7 @@ impl Ds18b20 {
     /// doesn't match the DS18B20 family code, `None` is returned.
     pub fn new(id: drv_onewire::Identifier) -> Option<Self> {
         if drv_onewire::family(id) == Some(drv_onewire::Family::DS18B20) {
-            Some(Self { id: id })
+            Some(Self { id })
         } else {
             None
         }
